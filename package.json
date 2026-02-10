@@ -1,0 +1,47 @@
+{
+  "name": "qdl-contracts",
+  "version": "1.0.0",
+  "description": "Quai DAO Launcher - MolochDAO V3 (Baal) for Quai Network",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "test:unit": "hardhat test test/unit/**/*.test.ts",
+    "test:integration": "hardhat test test/integration/**/*.test.ts",
+    "test:coverage": "hardhat coverage",
+    "test:gas": "REPORT_GAS=true hardhat test",
+    "deploy:local": "hardhat run scripts/deploy-full.ts --network localhost",
+    "deploy:orchard": "hardhat run scripts/deploy-full.ts --network orchardCyprus1",
+    "summon": "hardhat run scripts/summon-dao.ts",
+    "verify": "hardhat verify",
+    "clean": "hardhat clean && rm -rf cache artifacts typechain-types",
+    "lint": "solhint 'contracts/**/*.sol'",
+    "format": "prettier --write 'contracts/**/*.sol' 'test/**/*.ts' 'scripts/**/*.ts'"
+  },
+  "keywords": ["dao", "moloch", "baal", "quai", "governance"],
+  "author": "",
+  "license": "GPL-3.0-or-later",
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0",
+    "@quai/hardhat-deploy-metadata": "^1.0.8",
+    "dotenv": "^16.4.5",
+    "quais": "^1.0.0-alpha.53"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.0.3",
+    "@typechain/hardhat": "^9.1.0",
+    "@types/chai": "^4.3.11",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.10.6",
+    "chai": "^4.3.10",
+    "hardhat": "^2.19.5",
+    "hardhat-gas-reporter": "^1.0.9",
+    "prettier": "^3.1.1",
+    "prettier-plugin-solidity": "^1.3.1",
+    "solhint": "^4.1.1",
+    "solidity-coverage": "^0.8.5",
+    "ts-node": "^10.9.2",
+    "typechain": "^8.3.2",
+    "typescript": "^5.3.3"
+  }
+}
