@@ -21,6 +21,7 @@ const config: HardhatUserConfig = {
         runs: 1000,
       },
       evmVersion: "london",
+      viaIR: true, // Enable IR-based code generator for complex contracts
       metadata: {
         bytecodeHash: "ipfs",
         useLiteralContent: true,
