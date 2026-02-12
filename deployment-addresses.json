@@ -1,0 +1,14 @@
+{
+  "network": "cyprus1",
+  "chainId": "15000",
+  "timestamp": 1770922665823,
+  "deployer": "0x007204C0F8eB96e207482e1C472E4f74309aDb86",
+  "contracts": {
+    "Poster": "0x002C215233A997366e74bA9341bD5e8c70ea9eaf",
+    "SharesERC20Singleton": "0x004664115747d367266EB65bEEc862bE5585b9Db",
+    "LootERC20Singleton": "0x00659384c09552F8c1d2Ec6d40BD69f3F094f3E7",
+    "BaalSingleton": "0x0074CCC62d0Eb3245C0612859a86952285F9936D",
+    "BaalSummoner": "0x003EeEeCc4cB3460ebfD20F58702B497602cf29b",
+    "BaalAndVaultSummoner": "0x00026AfF6745B459fdF79790e9B43619c6856464"
+  }
+}

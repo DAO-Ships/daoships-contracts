@@ -1,30 +1,33 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.22;
 
-import "./BaalSummoner.sol";
+import "../interfaces/IBaalSummoner.sol";
 import "../interfaces/IQuaiVaultFactory.sol";
 
 /**
  * @title BaalAndVaultSummoner
  * @notice Factory for deploying Baal DAOs with integrated Quai Vault treasury
- * @dev Extends BaalSummoner to coordinate DAO + treasury deployment
- *      Can create new vault or connect to existing vault
+ * @dev Uses composition pattern (not inheritance) to avoid external self-call issues
+ *      Holds reference to BaalSummoner and calls it as a separate contract
+ *      Based on DAOHaus's BaalAndVaultSummoner design
  *
  * Architecture:
- * - Deploy Quai Vault via QuaiVaultFactory (or use existing)
- * - Deploy Baal + tokens via BaalSummoner
+ * - BaalAndVaultSummoner holds reference to BaalSummoner (composition)
+ * - Calls baalSummoner.summonBaal() as regular external call (not self-call)
+ * - Creates Quai Vault via QuaiVaultFactory
  * - Vault owners must separately enable Baal as module via enableModule()
  *
- * Note on Module Enablement:
- * - Baal needs to be enabled as a Zodiac module on the vault
- * - This requires vault owner signatures (cannot be done atomically)
- * - Vault owners should call vault.enableModule(baalAddress) after summoning
- * - Without enablement, Baal cannot execute treasury actions
+ * Key Difference from Previous Implementation:
+ * - OLD: BaalAndVaultSummoner extends BaalSummoner → this.summonBaal() (external self-call) ❌
+ * - NEW: BaalAndVaultSummoner → baalSummoner.summonBaal() (call to separate contract) ✅
  */
-contract BaalAndVaultSummoner is BaalSummoner {
+contract BaalAndVaultSummoner {
     // ═══════════════════════════════════════════════════════════════════════════════
     // IMMUTABLE
     // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// @notice BaalSummoner reference (separate contract)
+    IBaalSummoner public immutable baalSummoner;
 
     /// @notice Quai Vault factory address
     address public immutable quaiVaultFactory;
@@ -57,18 +60,14 @@ contract BaalAndVaultSummoner is BaalSummoner {
 
     /**
      * @notice Deploy BaalAndVaultSummoner
-     * @param _baalSingleton Baal singleton address
-     * @param _sharesSingleton SharesERC20 singleton address
-     * @param _lootSingleton LootERC20 singleton address
+     * @param _baalSummoner BaalSummoner contract address (separate contract)
      * @param _quaiVaultFactory Quai Vault factory address
      */
-    constructor(
-        address _baalSingleton,
-        address _sharesSingleton,
-        address _lootSingleton,
-        address _quaiVaultFactory
-    ) BaalSummoner(_baalSingleton, _sharesSingleton, _lootSingleton) {
+    constructor(address _baalSummoner, address _quaiVaultFactory) {
+        require(_baalSummoner != address(0), "BaalAndVaultSummoner: invalid summoner");
         require(_quaiVaultFactory != address(0), "BaalAndVaultSummoner: invalid factory");
+
+        baalSummoner = IBaalSummoner(_baalSummoner);
         quaiVaultFactory = _quaiVaultFactory;
     }
 
@@ -78,13 +77,17 @@ contract BaalAndVaultSummoner is BaalSummoner {
 
     /**
      * @notice Summon Baal with new Quai Vault
-     * @dev Creates vault via QuaiVaultFactory, then summons Baal
+     * @dev Creates vault via QuaiVaultFactory, then summons Baal via separate BaalSummoner
      *      Vault owners must call vault.enableModule(baal) afterwards
+     *      Uses composition pattern - no external self-call issues
      * @param initializationParams Encoded Baal initialization (with avatar = address(0))
      * @param initializationActions Optional Baal setup actions
      * @param vaultOwners Initial vault owners
      * @param vaultThreshold Signature threshold for vault
-     * @param salt Create2 salt for deterministic addresses
+     * @param vaultSalt Create2 salt for Quai Vault
+     * @param sharesSalt Create2 salt for SharesERC20 clone
+     * @param lootSalt Create2 salt for LootERC20 clone
+     * @param baalSalt Create2 salt for Baal clone
      * @return baal Deployed Baal address
      * @return vault Deployed Quai Vault address
      */
@@ -93,26 +96,33 @@ contract BaalAndVaultSummoner is BaalSummoner {
         bytes[] calldata initializationActions,
         address[] calldata vaultOwners,
         uint256 vaultThreshold,
-        uint256 salt
+        uint256 vaultSalt,
+        uint256 sharesSalt,
+        uint256 lootSalt,
+        uint256 baalSalt
     ) external returns (address payable baal, address vault) {
         // Validate vault parameters
         require(vaultOwners.length > 0, "BaalAndVaultSummoner: no owners");
-        require(vaultThreshold > 0 && vaultThreshold <= vaultOwners.length, "BaalAndVaultSummoner: invalid threshold");
+        require(
+            vaultThreshold > 0 && vaultThreshold <= vaultOwners.length,
+            "BaalAndVaultSummoner: invalid threshold"
+        );
 
         // Deploy Quai Vault
-        vault = IQuaiVaultFactory(quaiVaultFactory).createWallet(
-            vaultOwners,
-            vaultThreshold,
-            bytes32(salt)
-        );
+        vault = IQuaiVaultFactory(quaiVaultFactory).createWallet(vaultOwners, vaultThreshold, bytes32(vaultSalt));
 
         // Replace avatar (3rd param) in initializationParams with vault address
         bytes memory actualInitParams = _replaceAvatar(initializationParams, vault);
 
-        // Summon Baal (inherited function from BaalSummoner)
-        baal = this.summonBaal(actualInitParams, initializationActions, salt);
+        // Summon Baal via separate BaalSummoner contract
+        // KEY CHANGE: This is a regular external call to a DIFFERENT contract
+        // NOT an external self-call (this.summonBaal())
+        baal = baalSummoner.summonBaal(actualInitParams, initializationActions, sharesSalt, lootSalt, baalSalt);
 
-        emit SummonBaalAndVault(baal, vault, address(0), address(0), true, msg.sender);
+        // Get deployed token addresses from Baal
+        (address shares, address loot) = _getTokenAddresses(baal);
+
+        emit SummonBaalAndVault(baal, vault, shares, loot, true, msg.sender);
 
         return (baal, vault);
     }
@@ -124,24 +134,32 @@ contract BaalAndVaultSummoner is BaalSummoner {
      * @param initializationParams Encoded Baal initialization (with actual avatar address)
      * @param initializationActions Optional Baal setup actions
      * @param existingVault Existing Quai Vault address
-     * @param salt Create2 salt
+     * @param sharesSalt Create2 salt for SharesERC20 clone
+     * @param lootSalt Create2 salt for LootERC20 clone
+     * @param baalSalt Create2 salt for Baal clone
      * @return baal Deployed Baal address
      */
     function summonBaalWithVault(
         bytes calldata initializationParams,
         bytes[] calldata initializationActions,
         address existingVault,
-        uint256 salt
+        uint256 sharesSalt,
+        uint256 lootSalt,
+        uint256 baalSalt
     ) external returns (address payable baal) {
         require(existingVault != address(0), "BaalAndVaultSummoner: invalid vault");
 
         // Replace avatar in params if needed
         bytes memory actualInitParams = _replaceAvatar(initializationParams, existingVault);
 
-        // Summon Baal (inherited function from BaalSummoner)
-        baal = this.summonBaal(actualInitParams, initializationActions, salt);
+        // Summon Baal via separate BaalSummoner contract
+        // Regular external call to different contract (not self-call)
+        baal = baalSummoner.summonBaal(actualInitParams, initializationActions, sharesSalt, lootSalt, baalSalt);
 
-        emit SummonBaalAndVault(baal, existingVault, address(0), address(0), false, msg.sender);
+        // Get deployed token addresses from Baal
+        (address shares, address loot) = _getTokenAddresses(baal);
+
+        emit SummonBaalAndVault(baal, existingVault, shares, loot, false, msg.sender);
 
         return baal;
     }
@@ -162,11 +180,11 @@ contract BaalAndVaultSummoner is BaalSummoner {
         pure
         returns (bytes memory)
     {
-        // Decode params
+        // Decode params (skip oldAvatar as it's being replaced)
         (
             address lootToken,
             address sharesToken,
-            address oldAvatar, // Replaced with newAvatar
+            , // oldAvatar - skip unused parameter
             address forwarder,
             address multisendLibrary,
             bytes memory governanceConfig,
@@ -174,28 +192,46 @@ contract BaalAndVaultSummoner is BaalSummoner {
             uint256[] memory shamanPermissions,
             address[] memory initMembers,
             uint256[] memory initShareAmounts,
-            uint256[] memory initLootAmounts
+            uint256[] memory initLootAmounts,
+            address[] memory guildTokens
         ) = abi.decode(
-            initializationParams,
-            (address, address, address, address, address, bytes, address[], uint256[], address[], uint256[], uint256[])
-        );
-
-        // Silence unused variable warning
-        oldAvatar;
+                initializationParams,
+                (address, address, address, address, address, bytes, address[], uint256[], address[], uint256[], uint256[], address[])
+            );
 
         // Re-encode with new avatar
-        return abi.encode(
-            lootToken,
-            sharesToken,
-            newAvatar, // replaced
-            forwarder,
-            multisendLibrary,
-            governanceConfig,
-            shamans,
-            shamanPermissions,
-            initMembers,
-            initShareAmounts,
-            initLootAmounts
-        );
+        return
+            abi.encode(
+                lootToken,
+                sharesToken,
+                newAvatar, // replaced
+                forwarder,
+                multisendLibrary,
+                governanceConfig,
+                shamans,
+                shamanPermissions,
+                initMembers,
+                initShareAmounts,
+                initLootAmounts,
+                guildTokens
+            );
+    }
+
+    /**
+     * @notice Get token addresses from deployed Baal
+     * @param baal Baal contract address
+     * @return shares SharesERC20 address
+     * @return loot LootERC20 address
+     */
+    function _getTokenAddresses(address baal) internal view returns (address shares, address loot) {
+        // Call Baal to get token addresses
+        // Using low-level call to avoid importing full Baal interface
+        (bool success1, bytes memory data1) = baal.staticcall(abi.encodeWithSignature("sharesToken()"));
+        require(success1, "BaalAndVaultSummoner: failed to get shares");
+        shares = abi.decode(data1, (address));
+
+        (bool success2, bytes memory data2) = baal.staticcall(abi.encodeWithSignature("lootToken()"));
+        require(success2, "BaalAndVaultSummoner: failed to get loot");
+        loot = abi.decode(data2, (address));
     }
 }

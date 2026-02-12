@@ -2,22 +2,29 @@
 pragma solidity ^0.8.22;
 
 import "../core/Baal.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title EthOnboarderShaman
- * @notice Simple ETH → shares/loot onboarding with fixed price per unit
+ * @notice Simple native token → shares/loot onboarding with fixed price per unit
  * @dev Simpler variant of OnboarderShaman with direct pricePerUnit
+ *
+ * NOTE: "Eth" in the name is for compatibility with Baal ecosystem contracts.
+ *       On Quai Network, this shaman accepts QUAI (native token), not ETH.
  *
  * Features:
  * - Fixed price per share/loot unit
  * - No multiplier math (easier to understand)
  * - Expiration support
- * - ETH forwarded to DAO treasury
+ * - Native tokens forwarded to DAO treasury (QUAI on Quai Network)
  *
- * Example: pricePerUnit = 0.1 ETH, sharePerUnit = 1, lootPerUnit = 0
- *          Sending 1 ETH mints 10 shares
+ * Example: pricePerUnit = 0.1 QUAI, sharePerUnit = 1, lootPerUnit = 0
+ *          Sending 1 QUAI mints 10 shares
+ *
+ * Security:
+ * - ReentrancyGuard protects against reentrancy attacks
  */
-contract EthOnboarderShaman {
+contract EthOnboarderShaman is ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════════════════════
     // STATE VARIABLES
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -25,7 +32,7 @@ contract EthOnboarderShaman {
     /// @notice Associated Baal DAO
     Baal public baal;
 
-    /// @notice Price in wei per unit (e.g., 0.1 ETH = 100000000000000000)
+    /// @notice Price in wei per unit (e.g., 0.1 QUAI = 100000000000000000)
     uint256 public pricePerUnit;
 
     /// @notice Shares minted per unit purchased
@@ -44,7 +51,7 @@ contract EthOnboarderShaman {
     /**
      * @notice Emitted when someone onboards
      * @param contributor Address that sent tribute
-     * @param amount ETH amount sent
+     * @param amount Native token amount sent (QUAI on Quai Network)
      * @param units Units purchased
      * @param shares Shares minted
      * @param loot Loot minted
@@ -92,11 +99,11 @@ contract EthOnboarderShaman {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Onboard by sending ETH
+     * @notice Onboard by sending native tokens (QUAI on Quai Network)
      * @dev Calculates units based on msg.value / pricePerUnit
      *      Any remainder is refunded
      */
-    function onboard() external payable {
+    function onboard() public payable nonReentrant {
         require(msg.value >= pricePerUnit, "EthOnboarderShaman: insufficient payment");
         require(expiry == 0 || block.timestamp <= expiry, "EthOnboarderShaman: expired");
 
@@ -143,9 +150,9 @@ contract EthOnboarderShaman {
     }
 
     /**
-     * @notice Fallback function to accept ETH and trigger onboard
+     * @notice Fallback function to accept QUAI and trigger onboard
      */
     receive() external payable {
-        this.onboard();
+        onboard();
     }
 }

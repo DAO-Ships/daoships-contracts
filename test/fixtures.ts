@@ -114,14 +114,17 @@ export async function deployBaalFixture(): Promise<BaalFixture> {
     ]
   );
 
-  // Summon Baal
-  const salt = ethers.solidityPackedKeccak256(["string"], ["TEST"]);
-  const tx = await baalSummoner.summonBaal(initializationParams, [], salt);
+  // Summon Baal with three separate salts
+  const sharesSalt = ethers.solidityPackedKeccak256(["string"], ["TEST_SHARES"]);
+  const lootSalt = ethers.solidityPackedKeccak256(["string"], ["TEST_LOOT"]);
+  const baalSalt = ethers.solidityPackedKeccak256(["string"], ["TEST_BAAL"]);
+
+  const tx = await baalSummoner.summonBaal(initializationParams, [], sharesSalt, lootSalt, baalSalt);
   await tx.wait();
 
   // Get deployed addresses
   const [baalAddress, sharesAddress, lootAddress] =
-    await baalSummoner.calculateAddresses(salt);
+    await baalSummoner.calculateAddresses(deployer.address, sharesSalt, lootSalt, baalSalt);
 
   const baal = Baal.attach(baalAddress);
   const shares = SharesERC20.attach(sharesAddress);

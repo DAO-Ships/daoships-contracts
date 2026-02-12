@@ -22,22 +22,22 @@ import "@openzeppelin/contracts/access/Ownable.sol";
  */
 contract LootERC20 is ERC20, ERC20Pausable, Ownable, IBaalToken {
     /**
-     * @notice Constructor
-     * @dev Token starts with zero supply
-     *      Name and symbol are set by the Baal contract after deployment
+     * @notice Constructor for singleton deployment
+     * @dev Sets deployer as initial owner
+     *      For EIP-1167 clones, storage is empty so owner() returns address(0)
+     *      Clones must call initialize() to set owner
      */
     constructor() ERC20("Baal Loot", "LOOT") Ownable(msg.sender) {}
 
     /**
-     * @notice Initialize token with custom name and symbol
-     * @dev Called by Baal contract after clone deployment
-     * @param _name Token name (e.g., "MyDAO Loot")
-     * @param _symbol Token symbol (e.g., "MYDAO-LOOT")
+     * @notice Initialize token clone with owner
+     * @dev Only works for clones (where owner is address(0) due to empty storage)
+     *      For direct deployments, owner is already set by constructor
+     * @param _initialOwner Address to set as owner (Baal contract)
      */
-    function initialize(string memory _name, string memory _symbol) external onlyOwner {
-        // Note: OpenZeppelin ERC20 doesn't support post-deployment name change
-        // This function is kept for interface compatibility
-        // Name/symbol must be set via constructor or separate implementation
+    function initialize(address _initialOwner) external {
+        require(owner() == address(0), "LootERC20: already initialized");
+        _transferOwnership(_initialOwner);
     }
 
     /**

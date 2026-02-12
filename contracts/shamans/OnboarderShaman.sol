@@ -2,28 +2,33 @@
 pragma solidity ^0.8.22;
 
 import "../core/Baal.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
  * @title OnboarderShaman
- * @notice Allows anyone to join a Baal DAO by sending ETH
- * @dev MANAGER shaman that mints shares/loot in exchange for ETH tribute
+ * @notice Allows anyone to join a Baal DAO by sending native tokens
+ * @dev MANAGER shaman that mints shares/loot in exchange for native token tribute
  *      Features configurable multiplier, expiry, and minimum tribute
  *
+ * NOTE: On Quai Network, this shaman accepts QUAI (native token), not ETH.
+ *       The contract name follows Baal ecosystem conventions.
+ *
  * Features:
- * - ETH → shares and/or loot conversion
- * - Multiplier for flexible pricing (e.g., 2x means 1 ETH = 2 shares)
+ * - Native token → shares and/or loot conversion (QUAI on Quai Network)
+ * - Multiplier for flexible pricing (e.g., 2x means 1 QUAI = 2 shares)
  * - Expiration timestamp for time-limited onboarding
  * - Minimum tribute requirement (anti-spam)
  * - Only mints to tribute sender (no gifting)
- * - ETH forwarded to DAO treasury (avatar)
+ * - Native tokens forwarded to DAO treasury (avatar)
  *
  * Security:
  * - Requires MANAGER permission on Baal
  * - Cannot mint more than configured amounts
  * - Expiry prevents indefinite access
  * - Minimum tribute prevents dust attacks
+ * - ReentrancyGuard protects against reentrancy attacks
  */
-contract OnboarderShaman {
+contract OnboarderShaman is ReentrancyGuard {
     // ═══════════════════════════════════════════════════════════════════════════════
     // STATE VARIABLES
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -32,13 +37,13 @@ contract OnboarderShaman {
     Baal public baal;
 
     /// @notice Multiplier for shares (in basis points, 10000 = 1x)
-    ///         Example: 20000 = 2x (1 ETH = 2 shares)
+    ///         Example: 20000 = 2x (1 QUAI = 2 shares on Quai Network)
     uint256 public shareMultiplier;
 
     /// @notice Multiplier for loot (in basis points, 10000 = 1x)
     uint256 public lootMultiplier;
 
-    /// @notice Minimum ETH required to onboard (anti-spam)
+    /// @notice Minimum native token required to onboard (anti-spam, in wei)
     uint256 public minTribute;
 
     /// @notice Expiration timestamp (0 = no expiration)
@@ -51,7 +56,7 @@ contract OnboarderShaman {
     /**
      * @notice Emitted when someone onboards
      * @param contributor Address that sent tribute
-     * @param amount ETH amount sent
+     * @param amount Native token amount sent (QUAI on Quai Network, in wei)
      * @param shares Shares minted
      * @param loot Loot minted
      */
@@ -96,11 +101,11 @@ contract OnboarderShaman {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Onboard by sending ETH tribute
+     * @notice Onboard by sending native token tribute (QUAI on Quai Network)
      * @dev Mints shares/loot based on multipliers
-     *      ETH is forwarded to DAO treasury
+     *      Native tokens are forwarded to DAO treasury
      */
-    function onboard() external payable {
+    function onboard() public payable nonReentrant {
         require(msg.value >= minTribute, "OnboarderShaman: insufficient tribute");
         require(expiry == 0 || block.timestamp <= expiry, "OnboarderShaman: expired");
 
@@ -137,6 +142,6 @@ contract OnboarderShaman {
      * @notice Fallback function to accept ETH and trigger onboard
      */
     receive() external payable {
-        this.onboard();
+        onboard();
     }
 }

@@ -91,18 +91,23 @@ contract BaalSummoner {
      * @dev Deploys clones and initializes with provided parameters
      * @param initializationParams Encoded initialization data (see Baal.setUp)
      * @param initializationActions Optional setup actions to execute (e.g., setGuildTokens)
-     * @param salt Create2 salt for deterministic addresses
+     * @param sharesSalt Create2 salt for SharesERC20 clone
+     * @param lootSalt Create2 salt for LootERC20 clone
+     * @param baalSalt Create2 salt for Baal clone
      * @return baal Deployed Baal address
      */
     function summonBaal(
         bytes calldata initializationParams,
         bytes[] calldata initializationActions,
-        uint256 salt
+        uint256 sharesSalt,
+        uint256 lootSalt,
+        uint256 baalSalt
     ) external returns (address payable baal) {
         // Decode initialization params to get avatar and validate
+        // Note: lootToken and sharesToken are ignored (passed as address(0) by caller)
         (
-            address lootToken,
-            address sharesToken,
+            ,
+            ,
             address avatar,
             address forwarder,
             address multisendLibrary,
@@ -111,25 +116,26 @@ contract BaalSummoner {
             uint256[] memory shamanPermissions,
             address[] memory initMembers,
             uint256[] memory initShareAmounts,
-            uint256[] memory initLootAmounts
+            uint256[] memory initLootAmounts,
+            address[] memory guildTokens
         ) = abi.decode(
             initializationParams,
-            (address, address, address, address, address, bytes, address[], uint256[], address[], uint256[], uint256[])
+            (address, address, address, address, address, bytes, address[], uint256[], address[], uint256[], uint256[], address[])
         );
 
         // Validate avatar
         require(avatar != address(0), "BaalSummoner: invalid avatar");
 
-        // Deploy token clones
-        address shares = Clones.cloneDeterministic(sharesSingleton, keccak256(abi.encodePacked(salt, "SHARES")));
-        address loot = Clones.cloneDeterministic(lootSingleton, keccak256(abi.encodePacked(salt, "LOOT")));
+        // Deploy token clones with msg.sender-specific salt to prevent front-running
+        address shares = Clones.cloneDeterministic(sharesSingleton, keccak256(abi.encodePacked(msg.sender, sharesSalt)));
+        address loot = Clones.cloneDeterministic(lootSingleton, keccak256(abi.encodePacked(msg.sender, lootSalt)));
 
         // Deploy Baal clone
-        baal = payable(Clones.cloneDeterministic(baalSingleton, keccak256(abi.encodePacked(salt, "BAAL"))));
+        baal = payable(Clones.cloneDeterministic(baalSingleton, keccak256(abi.encodePacked(msg.sender, baalSalt))));
 
-        // Transfer ownership of tokens to Baal
-        SharesERC20(shares).transferOwnership(baal);
-        LootERC20(loot).transferOwnership(baal);
+        // Initialize token clones with Baal as owner
+        SharesERC20(shares).initialize(baal);
+        LootERC20(loot).initialize(baal);
 
         // Encode initialization params with actual token addresses
         bytes memory actualInitParams = abi.encode(
@@ -143,7 +149,8 @@ contract BaalSummoner {
             shamanPermissions,
             initMembers,
             initShareAmounts,
-            initLootAmounts
+            initLootAmounts,
+            guildTokens
         );
 
         // Initialize Baal
@@ -163,32 +170,35 @@ contract BaalSummoner {
     }
 
     /**
-     * @notice Calculate deterministic addresses for a given salt
-     * @param salt Create2 salt
+     * @notice Calculate deterministic addresses for a given sender and salts
+     * @param sender Address that will call summonBaal
+     * @param sharesSalt Create2 salt for SharesERC20 clone
+     * @param lootSalt Create2 salt for LootERC20 clone
+     * @param baalSalt Create2 salt for Baal clone
      * @return baal Predicted Baal address
      * @return shares Predicted SharesERC20 address
      * @return loot Predicted LootERC20 address
      */
-    function calculateAddresses(uint256 salt)
+    function calculateAddresses(address sender, uint256 sharesSalt, uint256 lootSalt, uint256 baalSalt)
         external
         view
         returns (address baal, address shares, address loot)
     {
         shares = Clones.predictDeterministicAddress(
             sharesSingleton,
-            keccak256(abi.encodePacked(salt, "SHARES")),
+            keccak256(abi.encodePacked(sender, sharesSalt)),
             address(this)
         );
 
         loot = Clones.predictDeterministicAddress(
             lootSingleton,
-            keccak256(abi.encodePacked(salt, "LOOT")),
+            keccak256(abi.encodePacked(sender, lootSalt)),
             address(this)
         );
 
         baal = Clones.predictDeterministicAddress(
             baalSingleton,
-            keccak256(abi.encodePacked(salt, "BAAL")),
+            keccak256(abi.encodePacked(sender, baalSalt)),
             address(this)
         );
 

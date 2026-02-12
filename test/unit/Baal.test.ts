@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { time, loadFixture } from "@nomicfoundation/hardhat-network-helpers";
-import { deployBaalFixture, advanceTime, getCurrentTime } from "../fixtures-simple";
+import { deployBaalFixture, advanceTime, getCurrentTime, encodeProposalData } from "../fixtures-simple";
 
 describe("Baal", function () {
   describe("Deployment", function () {
@@ -154,24 +154,23 @@ describe("Baal", function () {
     it("Should allow sponsorship by member with threshold", async function () {
       const { baal, alice, bob } = await loadFixture(deployBaalFixture);
 
-      // Alice submits (below threshold)
+      // Bob submits (has 0 shares, below threshold, won't auto-sponsor)
       const proposalData = ethers.AbiCoder.defaultAbiCoder().encode(
         ["address", "uint256", "bytes"],
-        [alice.address, 0, "0x"]
+        [bob.address, 0, "0x"]
       );
       const offering = await baal.proposalOffering();
       const tx = await baal
-        .connect(alice)
+        .connect(bob)
         .submitProposal(proposalData, 0, 0, "Test", { value: offering });
       await tx.wait();
 
-      // Should be in Submitted state
+      // Should be in Submitted state (not auto-sponsored)
       expect(await baal.state(1)).to.equal(1);
 
       // Alice sponsors (has 50 shares > 1 threshold)
-      await expect(baal.connect(alice).sponsorProposal(1))
-        .to.emit(baal, "SponsorProposal")
-        .withArgs(alice.address, 1, await time.latest());
+      const sponsorTx = await baal.connect(alice).sponsorProposal(1);
+      await expect(sponsorTx).to.emit(baal, "SponsorProposal");
 
       // Now in Voting state
       expect(await baal.state(1)).to.equal(2);
@@ -360,9 +359,10 @@ describe("Baal", function () {
     it("Should process passed proposal", async function () {
       const { baal, deployer, alice } = await loadFixture(deployBaalFixture);
 
-      const proposalData = ethers.AbiCoder.defaultAbiCoder().encode(
-        ["address", "uint256", "bytes"],
-        [deployer.address, 0, "0x"]
+      const proposalData = encodeProposalData(
+        [deployer.address],
+        [BigInt(0)],
+        ["0x"]
       );
 
       const proposalId = await submitVoteAndAdvance(

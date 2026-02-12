@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { time, loadFixture } from "@nomicfoundation/hardhat-network-helpers";
-import { deployBaalFixture, deployShamanFixture, advanceTime } from "../fixtures-simple";
+import { deployBaalFixture, deployShamanFixture, advanceTime, encodeProposalData } from "../fixtures-simple";
 
 describe("Baal Integration Tests", function () {
   describe("DAO Summoning", function () {
@@ -61,10 +61,11 @@ describe("Baal Integration Tests", function () {
     it("Should complete full proposal lifecycle: submit → vote → process", async function () {
       const { baal, deployer, alice } = await loadFixture(deployBaalFixture);
 
-      // 1. Submit proposal
-      const proposalData = ethers.AbiCoder.defaultAbiCoder().encode(
-        ["address", "uint256", "bytes"],
-        [deployer.address, 0, "0x"]
+      // 1. Submit proposal with MultiSend-encoded data
+      const proposalData = encodeProposalData(
+        [deployer.address],
+        [BigInt(0)],
+        ["0x"]
       );
       const offering = await baal.proposalOffering();
 
@@ -135,13 +136,16 @@ describe("Baal Integration Tests", function () {
       // Vote
       await baal.connect(deployer).submitVote(1, true);
 
-      // Advance past expiration (but within voting period)
-      await advanceTime(2 * 24 * 60 * 60);
+      // Advance past voting period AND grace period (11 days total)
+      await advanceTime(11 * 24 * 60 * 60);
 
-      // Try to process (should fail - expired)
-      await advanceTime(10 * 24 * 60 * 60); // Advance to after grace period
+      // Verify proposal is in Expired state (8 = ProposalState.Expired)
+      expect(await baal.state(1)).to.equal(8);
+
+      // Try to process (should fail - not ready because it's expired)
+      // Note: processProposal checks state == Ready first, so error is "not ready" not "expired"
       await expect(baal.processProposal(1, proposalData)).to.be.revertedWith(
-        "Baal: expired"
+        "Baal: not ready"
       );
     });
 

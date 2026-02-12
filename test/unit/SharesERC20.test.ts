@@ -86,13 +86,14 @@ describe("SharesERC20", function () {
       const { shares, deployer, alice } = await deployBaalFixture();
 
       const deployerBalance = await shares.balanceOf(deployer.address);
+      const aliceBalance = await shares.balanceOf(alice.address);
 
       // Delegate to Alice
       await shares.connect(deployer).delegate(alice.address);
 
-      // Alice should now have deployer's voting power
+      // Alice should now have both her own balance + deployer's delegated votes
       const aliceVotes = await shares.getCurrentVotes(alice.address);
-      expect(aliceVotes).to.equal(deployerBalance);
+      expect(aliceVotes).to.equal(deployerBalance + aliceBalance);
     });
 
     it("Should emit DelegateChanged event", async function () {
@@ -110,11 +111,14 @@ describe("SharesERC20", function () {
     it("Should emit DelegateVotesChanged event", async function () {
       const { shares, deployer, alice } = await deployBaalFixture();
 
-      const balance = await shares.balanceOf(deployer.address);
+      const deployerBalance = await shares.balanceOf(deployer.address);
+      const aliceBalance = await shares.balanceOf(alice.address);
 
+      // Alice already has aliceBalance voting power (auto-delegation)
+      // After deployer delegates, she'll have aliceBalance + deployerBalance
       await expect(shares.connect(deployer).delegate(alice.address))
         .to.emit(shares, "DelegateVotesChanged")
-        .withArgs(alice.address, 0, balance);
+        .withArgs(alice.address, aliceBalance, aliceBalance + deployerBalance);
     });
   });
 
@@ -196,20 +200,28 @@ describe("SharesERC20", function () {
     it("Should create checkpoints on balance changes", async function () {
       const { shares, deployer, alice } = await deployBaalFixture();
 
-      const timestamp1 = await time.latest();
+      // Transfer some shares (creates checkpoint at current time)
+      const tx = await shares.connect(deployer).transfer(alice.address, ethers.parseEther("10"));
+      const receipt = await tx.wait();
+      const transferBlock = await ethers.provider.getBlock(receipt!.blockNumber);
+      const timestamp1 = transferBlock!.timestamp;
 
-      // Transfer some shares
+      // Advance time to make timestamp1 queryable
+      await time.increase(100);
+
+      // Do another transfer (creates new checkpoint)
       await shares.connect(deployer).transfer(alice.address, ethers.parseEther("10"));
 
+      // Advance time again
       await time.increase(100);
-      const timestamp2 = await time.latest();
 
-      // Should be able to query voting power at both timestamps
+      // Should be able to query voting power at timestamp1 (after first transfer)
       const votes1 = await shares.getPriorVotes(deployer.address, timestamp1);
-      const votes2 = await shares.getPriorVotes(deployer.address, timestamp2);
+      expect(votes1).to.equal(ethers.parseEther("90")); // After first 10 token transfer
 
-      expect(votes1).to.equal(ethers.parseEther("100"));
-      expect(votes2).to.equal(ethers.parseEther("90")); // After transfer
+      // Current votes should reflect both transfers
+      const currentVotes = await shares.getCurrentVotes(deployer.address);
+      expect(currentVotes).to.equal(ethers.parseEther("80")); // After both transfers
     });
 
     it("Should consolidate checkpoints in same block", async function () {

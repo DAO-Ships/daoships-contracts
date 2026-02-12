@@ -48,7 +48,8 @@ export async function deployBaalFixture(): Promise<BaalFixture> {
   const poster = await Poster.deploy();
   await poster.waitForDeployment();
 
-  const multisend = await Poster.deploy();
+  const MultiSend = await ethers.getContractFactory("MultiSend");
+  const multisend = await MultiSend.deploy();
   await multisend.waitForDeployment();
 
   // Transfer ownership of tokens to Baal
@@ -94,6 +95,7 @@ export async function deployBaalFixture(): Promise<BaalFixture> {
       "address[]",
       "uint256[]",
       "uint256[]",
+      "address[]",
     ],
     [
       await loot.getAddress(),
@@ -107,6 +109,7 @@ export async function deployBaalFixture(): Promise<BaalFixture> {
       initMembers,
       initShareAmounts,
       initLootAmounts,
+      [], // no initial guild tokens
     ]
   );
 
@@ -134,49 +137,94 @@ export interface ShamanFixture extends BaalFixture {
 }
 
 export async function deployShamanFixture(): Promise<ShamanFixture> {
-  const base = await deployBaalFixture();
+  const [deployer, alice, bob, carol] = await ethers.getSigners();
 
-  // Deploy OnboarderShaman
+  const SharesERC20 = await ethers.getContractFactory("SharesERC20");
+  const shares = await SharesERC20.deploy();
+  const LootERC20 = await ethers.getContractFactory("LootERC20");
+  const loot = await LootERC20.deploy();
+  const Baal = await ethers.getContractFactory("Baal");
+  const baal = await Baal.deploy();
+  const MockAvatar = await ethers.getContractFactory("MockAvatar");
+  const avatar = await MockAvatar.deploy();
+  await avatar.enableModule(await baal.getAddress());
+  const Poster = await ethers.getContractFactory("Poster");
+  const poster = await Poster.deploy();
+  const MultiSend = await ethers.getContractFactory("MultiSend");
+  const multisend = await MultiSend.deploy();
+  await shares.transferOwnership(await baal.getAddress());
+  await loot.transferOwnership(await baal.getAddress());
+
+  // Deploy shamans
   const OnboarderShaman = await ethers.getContractFactory("OnboarderShaman");
-  const onboarder = await OnboarderShaman.deploy(
-    await base.baal.getAddress(),
-    20000, // 2x multiplier for shares
-    0, // no loot
-    ethers.parseEther("0.01"), // 0.01 ETH min tribute
-    0 // no expiry
-  );
-  await onboarder.waitForDeployment();
-
-  // Deploy EthOnboarderShaman
-  const EthOnboarderShaman = await ethers.getContractFactory(
-    "EthOnboarderShaman"
-  );
-  const ethOnboarder = await EthOnboarderShaman.deploy(
-    await base.baal.getAddress(),
-    ethers.parseEther("0.1"), // 0.1 ETH per unit
-    ethers.parseEther("1"), // 1 share per unit
-    0, // no loot
-    0 // no expiry
-  );
-  await ethOnboarder.waitForDeployment();
-
-  // Deploy CheckInShamanV2
+  const onboarder = await OnboarderShaman.deploy(await baal.getAddress(), 20000, 0, ethers.parseEther("0.01"), 0);
+  const EthOnboarderShaman = await ethers.getContractFactory("EthOnboarderShaman");
+  const ethOnboarder = await EthOnboarderShaman.deploy(await baal.getAddress(), ethers.parseEther("0.1"), ethers.parseEther("1"), 0, 0);
   const CheckInShamanV2 = await ethers.getContractFactory("CheckInShamanV2");
-  const checkInShaman = await CheckInShamanV2.deploy(
-    await base.baal.getAddress(),
-    30 * 24 * 60 * 60, // 30 days
-    ethers.parseEther("10"), // 10 shares per claim
-    0, // no loot
-    3 // max 3 missed claims
-  );
-  await checkInShaman.waitForDeployment();
+  const checkInShaman = await CheckInShamanV2.deploy(await baal.getAddress(), 30*24*60*60, ethers.parseEther("10"), 0, 3);
 
-  return {
-    ...base,
-    onboarder,
-    ethOnboarder,
-    checkInShaman,
-  };
+  const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
+    ["uint32", "uint32", "uint256", "uint256", "uint256", "uint256"],
+    [7*24*60*60, 3*24*60*60, ethers.parseEther("0.1"), 2000, ethers.parseEther("1"), 6600]
+  );
+
+  const initParams = ethers.AbiCoder.defaultAbiCoder().encode(
+    ["address", "address", "address", "address", "address", "bytes", "address[]", "uint256[]", "address[]", "uint256[]", "uint256[]", "address[]"],
+    [await loot.getAddress(), await shares.getAddress(), await avatar.getAddress(), ethers.ZeroAddress, await multisend.getAddress(), governanceConfig,
+     [await onboarder.getAddress(), await ethOnboarder.getAddress(), await checkInShaman.getAddress()], [2, 2, 2],
+     [deployer.address, alice.address], [ethers.parseEther("100"), ethers.parseEther("50")], [ethers.parseEther("0"), ethers.parseEther("25")],
+     []] // no initial guild tokens
+  );
+
+  await baal.setUp(initParams);
+
+  return { baal, shares, loot, avatar, multisend, poster, deployer, alice, bob, carol, onboarder, ethOnboarder, checkInShaman };
+}
+
+/**
+ * Helper to set shamans via proposal
+ */
+export async function setShamansViaProposal(
+  baal: any,
+  proposer: any,
+  shamanAddresses: string[],
+  permissions: number[]
+) {
+  // Encode proposal data
+  const proposalData = ethers.AbiCoder.defaultAbiCoder().encode(
+    ["address", "uint256", "bytes"],
+    [
+      await baal.getAddress(),
+      0,
+      baal.interface.encodeFunctionData("setShamans", [
+        shamanAddresses,
+        permissions,
+      ]),
+    ]
+  );
+
+  // Submit proposal
+  const offering = await baal.proposalOffering();
+  const submitTx = await baal.connect(proposer).submitProposal(
+    proposalData,
+    0,
+    0,
+    "Set Shamans",
+    { value: offering }
+  );
+  await submitTx.wait();
+
+  // Get the proposal ID from the proposalCount
+  const proposalId = await baal.proposalCount();
+
+  // Vote and process
+  const voteTx = await baal.connect(proposer).submitVote(proposalId, true);
+  await voteTx.wait();
+
+  await time.increase(11 * 24 * 60 * 60); // 11 days
+
+  const processTx = await baal.processProposal(proposalId, proposalData);
+  await processTx.wait();
 }
 
 /**
@@ -196,35 +244,34 @@ export async function getCurrentTime(): Promise<number> {
 }
 
 /**
- * Helper to encode proposal data
+ * Helper to encode proposal data for MultiSend
+ *
+ * Returns encoded calldata for MultiSend.multiSend(bytes transactions)
+ * Format: [multiSend selector][ABI-encoded bytes containing packed transactions]
+ *
+ * Packed transactions format: [operation][to][value][dataLength][data]...
  */
 export function encodeProposalData(
   targets: string[],
   values: bigint[],
   datas: string[]
 ): string {
-  // Simple encoding for single action
-  if (targets.length === 1) {
-    return ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "uint256", "bytes"],
-      [targets[0], values[0], datas[0]]
-    );
-  }
-
-  // MultiSend encoding for multiple actions
-  let encoded = "0x";
+  // Pack transactions in MultiSend format
+  let packed = "0x";
   for (let i = 0; i < targets.length; i++) {
     const operation = 0; // Call
-    const data = datas[i].slice(2); // Remove 0x
-    const dataLength = data.length / 2;
+    const dataBytes = datas[i] === "0x" ? "" : datas[i].slice(2);
+    const dataLength = dataBytes.length / 2;
 
-    encoded +=
+    packed +=
       operation.toString(16).padStart(2, "0") +
       targets[i].slice(2).padStart(40, "0") +
       values[i].toString(16).padStart(64, "0") +
       dataLength.toString(16).padStart(64, "0") +
-      data;
+      dataBytes;
   }
 
-  return encoded;
+  // Encode as multiSend(bytes transactions) calldata
+  const multiSendInterface = new ethers.Interface(["function multiSend(bytes transactions)"]);
+  return multiSendInterface.encodeFunctionData("multiSend", [packed]);
 }

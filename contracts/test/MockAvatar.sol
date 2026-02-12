@@ -47,7 +47,7 @@ contract MockAvatar is IAvatar {
     }
 
     /// @notice Execute transaction from module
-    /// @dev Always succeeds for testing purposes
+    /// @dev Actually executes the transaction for realistic testing
     function execTransactionFromModule(
         address to,
         uint256 value,
@@ -56,13 +56,23 @@ contract MockAvatar is IAvatar {
     ) external override returns (bool success) {
         require(modules[msg.sender], "MockAvatar: not enabled module");
 
-        // For testing, just return true
-        // In a real implementation, this would execute the transaction
-        return true;
+        // Execute the transaction
+        if (operation == Enum.Operation.Call) {
+            // Standard call
+            (success, ) = to.call{value: value}(data);
+        } else if (operation == Enum.Operation.DelegateCall) {
+            // Delegate call
+            (success, ) = to.delegatecall(data);
+        } else {
+            // Create operation not supported in mock
+            revert("MockAvatar: create not supported");
+        }
+
+        return success;
     }
 
     /// @notice Execute transaction from module and return data
-    /// @dev Always succeeds for testing purposes
+    /// @dev Actually executes the transaction and returns data
     function execTransactionFromModuleReturnData(
         address to,
         uint256 value,
@@ -71,8 +81,19 @@ contract MockAvatar is IAvatar {
     ) external override returns (bool success, bytes memory returnData) {
         require(modules[msg.sender], "MockAvatar: not enabled module");
 
-        // For testing, just return true and empty data
-        return (true, "");
+        // Execute the transaction
+        if (operation == Enum.Operation.Call) {
+            // Standard call
+            (success, returnData) = to.call{value: value}(data);
+        } else if (operation == Enum.Operation.DelegateCall) {
+            // Delegate call
+            (success, returnData) = to.delegatecall(data);
+        } else {
+            // Create operation not supported in mock
+            revert("MockAvatar: create not supported");
+        }
+
+        return (success, returnData);
     }
 
     /// @notice Check if module is enabled

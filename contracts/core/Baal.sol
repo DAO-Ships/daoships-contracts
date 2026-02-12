@@ -32,7 +32,23 @@ contract Baal is ReentrancyGuard {
     // CONSTANTS
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// @notice Shaman permission: can pause tokens, set governance config
+    /**
+     * @notice Shaman permission system uses bit flags for combining permissions
+     *
+     * Permissions:
+     * - ADMIN (1):    Can pause/unpause tokens, set governance config
+     * - MANAGER (2):  Can mint/burn shares and loot
+     * - GOVERNOR (4): Can cancel proposals, set governance config
+     *
+     * Combining permissions (bitwise OR):
+     * - ADMIN + MANAGER = 3
+     * - ADMIN + GOVERNOR = 5
+     * - MANAGER + GOVERNOR = 6
+     * - ALL PERMISSIONS = 7
+     *
+     * Checking permissions (bitwise AND):
+     * - require((shamans[address] & MANAGER) != 0, "not manager");
+     */
     uint256 public constant ADMIN = 1;
 
     /// @notice Shaman permission: can mint/burn shares and loot
@@ -40,6 +56,15 @@ contract Baal is ReentrancyGuard {
 
     /// @notice Shaman permission: can cancel proposals, set governance config
     uint256 public constant GOVERNOR = 4;
+
+    /// @notice Minimum voting period (prevents flash governance attacks)
+    uint32 public constant MIN_VOTING_PERIOD = 1 hours;
+
+    /// @notice Basis points divisor for percentage calculations (100% = 10000 basis points)
+    uint256 public constant BASIS_POINTS_DIVISOR = 10000;
+
+    /// @notice Maximum shamans that can be set in a single call (prevents gas limit DoS)
+    uint256 public constant MAX_SHAMANS_PER_CALL = 20;
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // STATE VARIABLES
@@ -72,7 +97,7 @@ contract Baal is ReentrancyGuard {
     /// @notice Grace period duration in seconds (after voting, before processing)
     uint32 public gracePeriod;
 
-    /// @notice ETH required to submit a proposal (anti-spam)
+    /// @notice Native tokens (QUAI on Quai Network) required to submit a proposal (anti-spam)
     uint256 public proposalOffering;
 
     /// @notice Quorum percentage in basis points (e.g., 2000 = 20%)
@@ -149,6 +174,7 @@ contract Baal is ReentrancyGuard {
         uint32 noVotes;
         uint256 yesBalance;
         uint256 noBalance;
+        uint256 maxTotalSharesAtSponsor; // Total shares snapshot at sponsorship (for quorum)
         string details;
         bool[4] status; // [cancelled, processed, passed, actionFailed]
     }
@@ -178,7 +204,7 @@ contract Baal is ReentrancyGuard {
      * @param sharesPaused Whether shares token is paused
      * @param gracePeriod Grace period duration
      * @param votingPeriod Voting period duration
-     * @param proposalOffering ETH required to submit proposal
+     * @param proposalOffering Native tokens (QUAI on Quai Network) required to submit proposal
      * @param quorumPercent Quorum percentage (basis points)
      * @param sponsorThreshold Minimum shares to sponsor
      * @param minRetentionPercent Minimum retention after ragequit (basis points)
@@ -407,10 +433,11 @@ contract Baal is ReentrancyGuard {
             uint256[] memory _shamanPermissions,
             address[] memory _initMembers,
             uint256[] memory _initShareAmounts,
-            uint256[] memory _initLootAmounts
+            uint256[] memory _initLootAmounts,
+            address[] memory _guildTokens
         ) = abi.decode(
             _initializationParams,
-            (address, address, address, address, address, bytes, address[], uint256[], address[], uint256[], uint256[])
+            (address, address, address, address, address, bytes, address[], uint256[], address[], uint256[], uint256[], address[])
         );
 
         // Validate tokens
@@ -435,9 +462,9 @@ contract Baal is ReentrancyGuard {
             uint256 _minRetentionPercent
         ) = abi.decode(_governanceConfig, (uint32, uint32, uint256, uint256, uint256, uint256));
 
-        require(_votingPeriod > 0, "Baal: invalid voting period");
-        require(_quorumPercent <= 10000, "Baal: invalid quorum");
-        require(_minRetentionPercent <= 10000, "Baal: invalid retention");
+        require(_votingPeriod >= MIN_VOTING_PERIOD, "Baal: voting period too short");
+        require(_quorumPercent <= BASIS_POINTS_DIVISOR, "Baal: invalid quorum");
+        require(_minRetentionPercent <= BASIS_POINTS_DIVISOR, "Baal: invalid retention");
 
         votingPeriod = _votingPeriod;
         gracePeriod = _gracePeriod;
@@ -453,6 +480,11 @@ contract Baal is ReentrancyGuard {
                 shamans[_shamans[i]] = _shamanPermissions[i];
                 emit ShamanSet(_shamans[i], _shamanPermissions[i]);
             }
+        }
+
+        // Set initial guild tokens
+        for (uint256 i = 0; i < _guildTokens.length; i++) {
+            guildTokens[_guildTokens[i]] = true;
         }
 
         // Mint initial shares and loot
@@ -475,8 +507,7 @@ contract Baal is ReentrancyGuard {
             }
         }
 
-        // Emit setup complete (no guild tokens yet, must be set via proposal)
-        address[] memory emptyTokens = new address[](0);
+        // Emit setup complete with initial guild tokens
         emit SetupComplete(
             lootToken.paused(),
             sharesToken.paused(),
@@ -488,7 +519,7 @@ contract Baal is ReentrancyGuard {
             minRetentionPercent,
             sharesToken.name(),
             sharesToken.symbol(),
-            emptyTokens,
+            _guildTokens,
             totalShares,
             totalLoot
         );
@@ -530,6 +561,14 @@ contract Baal is ReentrancyGuard {
     modifier onlyGovernor() {
         require((shamans[msg.sender] & GOVERNOR) != 0 || msg.sender == address(this), "Baal: not governor");
         require(!governorLock, "Baal: governor locked");
+        _;
+    }
+
+    /**
+     * @notice Only allows avatar (via proposals) or Baal itself (internal calls)
+     */
+    modifier baalOrAvatar() {
+        require(msg.sender == avatar || msg.sender == address(this), "Baal: not avatar or self");
         _;
     }
 
@@ -646,6 +685,18 @@ contract Baal is ReentrancyGuard {
         require(msg.value == proposalOffering, "Baal: incorrect offering");
         require(proposalData.length > 0, "Baal: empty proposal");
 
+        // M-3 fix: Validate expiration is in the future
+        require(
+            expiration == 0 || expiration > block.timestamp,
+            "Baal: expiration in past"
+        );
+
+        // Send proposal offering to treasury (avatar)
+        if (msg.value > 0) {
+            (bool success, ) = avatar.call{value: msg.value}("");
+            require(success, "Baal: offering transfer failed");
+        }
+
         // Check if submitter can auto-sponsor
         bool selfSponsor = sharesToken.balanceOf(msg.sender) >= sponsorThreshold;
 
@@ -669,6 +720,7 @@ contract Baal is ReentrancyGuard {
             noVotes: 0,
             yesBalance: 0,
             noBalance: 0,
+            maxTotalSharesAtSponsor: 0, // Set during sponsorship
             details: details,
             status: [false, false, false, false]
         });
@@ -723,6 +775,9 @@ contract Baal is ReentrancyGuard {
         prop.votingStarts = uint32(block.timestamp);
         prop.votingEnds = uint32(block.timestamp) + votingPeriod;
         prop.graceEnds = uint32(block.timestamp) + votingPeriod + gracePeriod;
+
+        // Capture total shares snapshot for quorum calculation (C-1 fix)
+        prop.maxTotalSharesAtSponsor = sharesToken.totalSupply();
 
         // Update linked list
         prop.prevProposalId = latestSponsoredProposalId;
@@ -852,10 +907,12 @@ contract Baal is ReentrancyGuard {
     function _didProposalPass(uint32 id) internal view returns (bool) {
         Proposal storage prop = proposals[id];
 
-        uint256 totalSharesAtVote = sharesToken.totalSupply();
+        // Use snapshot from sponsorship time (C-1 fix)
+        // This prevents quorum manipulation via post-vote minting/burning
+        uint256 totalSharesAtVote = prop.maxTotalSharesAtSponsor;
 
         // Check quorum (yes votes must meet minimum threshold)
-        uint256 quorumRequired = (totalSharesAtVote * quorumPercent) / 10000;
+        uint256 quorumRequired = (totalSharesAtVote * quorumPercent) / BASIS_POINTS_DIVISOR;
         if (prop.yesBalance < quorumRequired) {
             return false;
         }
@@ -969,9 +1026,9 @@ contract Baal is ReentrancyGuard {
             uint256 _minRetentionPercent
         ) = abi.decode(_governanceConfig, (uint32, uint32, uint256, uint256, uint256, uint256));
 
-        require(_votingPeriod > 0, "Baal: invalid voting period");
-        require(_quorumPercent <= 10000, "Baal: invalid quorum");
-        require(_minRetentionPercent <= 10000, "Baal: invalid retention");
+        require(_votingPeriod >= MIN_VOTING_PERIOD, "Baal: voting period too short");
+        require(_quorumPercent <= BASIS_POINTS_DIVISOR, "Baal: invalid quorum");
+        require(_minRetentionPercent <= BASIS_POINTS_DIVISOR, "Baal: invalid retention");
 
         votingPeriod = _votingPeriod;
         gracePeriod = _gracePeriod;
@@ -1001,6 +1058,7 @@ contract Baal is ReentrancyGuard {
      */
     function setShamans(address[] calldata _shamans, uint256[] calldata _permissions) external baalOnly {
         require(_shamans.length == _permissions.length, "Baal: length mismatch");
+        require(_shamans.length <= MAX_SHAMANS_PER_CALL, "Baal: too many shamans");
 
         for (uint256 i = 0; i < _shamans.length; i++) {
             shamans[_shamans[i]] = _permissions[i];
@@ -1049,12 +1107,14 @@ contract Baal is ReentrancyGuard {
 
     /**
      * @notice Execute arbitrary call as Baal (via proposal)
+     * @dev Can only be called by avatar (via proposal) or Baal itself
+     * @dev This enables calling baalOnly functions via governance proposals
      * @param _to Target address
      * @param _value ETH value
      * @param _data Call data
      */
-    function executeAsBaal(address _to, uint256 _value, bytes calldata _data) external baalOnly {
-        (bool success, ) = _to.call{value: _value}(_data);
+    function executeAsBaal(address _to, uint256 _value, bytes calldata _data) external baalOrAvatar {
+        (bool success, ) = address(this).call{value: _value}(_data);
         require(success, "Baal: execute failed");
     }
 
@@ -1085,7 +1145,7 @@ contract Baal is ReentrancyGuard {
         uint256 currentTotalSupply = currentTotalShares + currentTotalLoot;
 
         // Check retention requirement
-        uint256 minRetention = (currentTotalSupply * minRetentionPercent) / 10000;
+        uint256 minRetention = (currentTotalSupply * minRetentionPercent) / BASIS_POINTS_DIVISOR;
         require(currentTotalSupply - totalToBurn >= minRetention, "Baal: insufficient retention");
 
         // Validate tokens and check for duplicates
@@ -1110,26 +1170,48 @@ contract Baal is ReentrancyGuard {
         }
 
         // Withdraw proportional assets
+        // Cache avatar address to save gas (L-2 optimization)
+        address avatarCache = avatar;
+
         for (uint256 i = 0; i < tokens.length; i++) {
-            // Get token balance in treasury
-            (bool success, bytes memory data) = tokens[i].staticcall(
-                abi.encodeWithSignature("balanceOf(address)", avatar)
-            );
-            require(success, "Baal: balance query failed");
-            uint256 balance = abi.decode(data, (uint256));
+            uint256 balance;
+
+            // Handle ETH (address(0)) vs ERC20 tokens
+            if (tokens[i] == address(0)) {
+                // ETH balance
+                balance = avatarCache.balance;
+            } else {
+                // ERC20 token balance
+                (bool success, bytes memory data) = tokens[i].staticcall(
+                    abi.encodeWithSignature("balanceOf(address)", avatarCache)
+                );
+                require(success, "Baal: balance query failed");
+                balance = abi.decode(data, (uint256));
+            }
 
             // Calculate fair share
             uint256 fairShare = (balance * totalToBurn) / currentTotalSupply;
 
             if (fairShare > 0) {
-                // Execute withdrawal via IAvatar
-                bool execSuccess = IAvatar(avatar).execTransactionFromModule(
-                    tokens[i],
-                    0,
-                    abi.encodeWithSignature("transfer(address,uint256)", to, fairShare),
-                    Enum.Operation.Call
-                );
-                require(execSuccess, "Baal: transfer failed");
+                if (tokens[i] == address(0)) {
+                    // Transfer ETH via IAvatar
+                    bool execSuccess = IAvatar(avatarCache).execTransactionFromModule(
+                        to,
+                        fairShare,
+                        "",
+                        Enum.Operation.Call
+                    );
+                    require(execSuccess, "Baal: ETH transfer failed");
+                } else {
+                    // Transfer ERC20 via IAvatar
+                    bool execSuccess = IAvatar(avatarCache).execTransactionFromModule(
+                        tokens[i],
+                        0,
+                        abi.encodeWithSignature("transfer(address,uint256)", to, fairShare),
+                        Enum.Operation.Call
+                    );
+                    require(execSuccess, "Baal: token transfer failed");
+                }
             }
         }
 

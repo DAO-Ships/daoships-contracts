@@ -7,7 +7,7 @@ pragma solidity ^0.8.22;
  * @dev Used by BaalAndVaultSummoner to create Quai Vaults
  *
  * Reference: https://github.com/Quai-Vault/quaivault-contracts
- * Deployed at: 0x005261a837f1eFEa0e23b66dc526EB6054FD2250 (Cyprus1)
+ * Deployed at: 0x00233Cb4F587287aFe5c7e88b971A3a36b3ba0d6 (Cyprus1)
  */
 interface IQuaiVaultFactory {
     /**

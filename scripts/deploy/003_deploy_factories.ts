@@ -61,15 +61,14 @@ async function main() {
   } else {
     // Deploy BaalAndVaultSummoner
     console.log("\n2. Deploying BaalAndVaultSummoner...");
+    console.log(`   Using BaalSummoner: ${baalSummonerAddress}`);
     console.log(`   Using QuaiVaultFactory: ${quaiVaultFactory}`);
 
     const BaalAndVaultSummoner = await ethers.getContractFactory(
       "BaalAndVaultSummoner"
     );
     const baalAndVaultSummoner = await BaalAndVaultSummoner.deploy(
-      baalSingleton,
-      sharesSingleton,
-      lootSingleton,
+      baalSummonerAddress,
       quaiVaultFactory
     );
     await baalAndVaultSummoner.waitForDeployment();

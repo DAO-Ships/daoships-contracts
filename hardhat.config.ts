@@ -38,58 +38,11 @@ const config: HardhatUserConfig = {
       chainId: 1337,
     },
     // Quai Network zones - Cyprus region
-    orchardCyprus1: {
-      url: rpcUrl,
-      accounts: process.env.CYPRUS1_PK ? [process.env.CYPRUS1_PK] : [],
-      chainId: chainId,
-    },
     cyprus1: {
       url: rpcUrl,
       accounts: process.env.CYPRUS1_PK ? [process.env.CYPRUS1_PK] : [],
       chainId: chainId,
-    },
-    cyprus2: {
-      url: rpcUrl,
-      accounts: process.env.CYPRUS2_PK ? [process.env.CYPRUS2_PK] : [],
-      chainId: chainId,
-    },
-    cyprus3: {
-      url: rpcUrl,
-      accounts: process.env.CYPRUS3_PK ? [process.env.CYPRUS3_PK] : [],
-      chainId: chainId,
-    },
-    // Paxos region
-    paxos1: {
-      url: rpcUrl,
-      accounts: process.env.PAXOS1_PK ? [process.env.PAXOS1_PK] : [],
-      chainId: chainId,
-    },
-    paxos2: {
-      url: rpcUrl,
-      accounts: process.env.PAXOS2_PK ? [process.env.PAXOS2_PK] : [],
-      chainId: chainId,
-    },
-    paxos3: {
-      url: rpcUrl,
-      accounts: process.env.PAXOS3_PK ? [process.env.PAXOS3_PK] : [],
-      chainId: chainId,
-    },
-    // Hydra region
-    hydra1: {
-      url: rpcUrl,
-      accounts: process.env.HYDRA1_PK ? [process.env.HYDRA1_PK] : [],
-      chainId: chainId,
-    },
-    hydra2: {
-      url: rpcUrl,
-      accounts: process.env.HYDRA2_PK ? [process.env.HYDRA2_PK] : [],
-      chainId: chainId,
-    },
-    hydra3: {
-      url: rpcUrl,
-      accounts: process.env.HYDRA3_PK ? [process.env.HYDRA3_PK] : [],
-      chainId: chainId,
-    },
+    }
   },
   etherscan: {
     apiKey: process.env.ETHERSCAN_API_KEY || "",

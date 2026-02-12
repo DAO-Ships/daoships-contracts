@@ -132,6 +132,13 @@ abstract contract BaalVotes is ERC20 {
      * @dev Updates checkpoints for voting power
      */
     function _update(address from, address to, uint256 amount) internal virtual override {
+        // Auto-delegate on first mint (H-5 fix: race condition protection)
+        // Check BEFORE super._update() to get balance before the transfer
+        // Check both balance and checkpoints to prevent double-delegation in same block
+        if (to != address(0) && balanceOf(to) == 0 && _checkpoints[to].length == 0 && amount > 0) {
+            _delegates[to] = to;
+        }
+
         super._update(from, to, amount);
 
         // Update voting power
@@ -156,8 +163,16 @@ abstract contract BaalVotes is ERC20 {
             }
         }
 
-        // Update total supply checkpoint
-        _writeCheckpoint(_totalSupplyCheckpoints, _add, amount);
+        // Update total supply checkpoint (C-2 fix)
+        // Differentiate mint, burn, and transfer to maintain accurate total supply history
+        if (from == address(0)) {
+            // Mint: increase total supply
+            _writeCheckpoint(_totalSupplyCheckpoints, _add, amount);
+        } else if (to == address(0)) {
+            // Burn: decrease total supply
+            _writeCheckpoint(_totalSupplyCheckpoints, _subtract, amount);
+        }
+        // Transfer (from != 0 && to != 0): no change to total supply, no checkpoint update
     }
 
     /**
