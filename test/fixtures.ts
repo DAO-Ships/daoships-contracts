@@ -119,7 +119,7 @@ export async function deployBaalFixture(): Promise<BaalFixture> {
   const lootSalt = ethers.solidityPackedKeccak256(["string"], ["TEST_LOOT"]);
   const baalSalt = ethers.solidityPackedKeccak256(["string"], ["TEST_BAAL"]);
 
-  const tx = await baalSummoner.summonBaal(initializationParams, [], sharesSalt, lootSalt, baalSalt);
+  const tx = await baalSummoner.summonBaal(initializationParams, [], "Test Shares", "TSHARES", "Test Loot", "TLOOT", sharesSalt, lootSalt, baalSalt);
   await tx.wait();
 
   // Get deployed addresses

@@ -82,6 +82,10 @@ contract BaalAndVaultSummoner {
      *      Uses composition pattern - no external self-call issues
      * @param initializationParams Encoded Baal initialization (with avatar = address(0))
      * @param initializationActions Optional Baal setup actions
+     * @param shareTokenName Name for the shares token
+     * @param shareTokenSymbol Symbol for the shares token
+     * @param lootTokenName Name for the loot token
+     * @param lootTokenSymbol Symbol for the loot token
      * @param vaultOwners Initial vault owners
      * @param vaultThreshold Signature threshold for vault
      * @param vaultSalt Create2 salt for Quai Vault
@@ -94,6 +98,10 @@ contract BaalAndVaultSummoner {
     function summonBaalAndVault(
         bytes calldata initializationParams,
         bytes[] calldata initializationActions,
+        string calldata shareTokenName,
+        string calldata shareTokenSymbol,
+        string calldata lootTokenName,
+        string calldata lootTokenSymbol,
         address[] calldata vaultOwners,
         uint256 vaultThreshold,
         uint256 vaultSalt,
@@ -117,7 +125,7 @@ contract BaalAndVaultSummoner {
         // Summon Baal via separate BaalSummoner contract
         // KEY CHANGE: This is a regular external call to a DIFFERENT contract
         // NOT an external self-call (this.summonBaal())
-        baal = baalSummoner.summonBaal(actualInitParams, initializationActions, sharesSalt, lootSalt, baalSalt);
+        baal = baalSummoner.summonBaal(actualInitParams, initializationActions, shareTokenName, shareTokenSymbol, lootTokenName, lootTokenSymbol, sharesSalt, lootSalt, baalSalt);
 
         // Get deployed token addresses from Baal
         (address shares, address loot) = _getTokenAddresses(baal);
@@ -133,6 +141,10 @@ contract BaalAndVaultSummoner {
      *      Vault owners must call vault.enableModule(baal) afterwards
      * @param initializationParams Encoded Baal initialization (with actual avatar address)
      * @param initializationActions Optional Baal setup actions
+     * @param shareTokenName Name for the shares token
+     * @param shareTokenSymbol Symbol for the shares token
+     * @param lootTokenName Name for the loot token
+     * @param lootTokenSymbol Symbol for the loot token
      * @param existingVault Existing Quai Vault address
      * @param sharesSalt Create2 salt for SharesERC20 clone
      * @param lootSalt Create2 salt for LootERC20 clone
@@ -142,6 +154,10 @@ contract BaalAndVaultSummoner {
     function summonBaalWithVault(
         bytes calldata initializationParams,
         bytes[] calldata initializationActions,
+        string calldata shareTokenName,
+        string calldata shareTokenSymbol,
+        string calldata lootTokenName,
+        string calldata lootTokenSymbol,
         address existingVault,
         uint256 sharesSalt,
         uint256 lootSalt,
@@ -154,7 +170,7 @@ contract BaalAndVaultSummoner {
 
         // Summon Baal via separate BaalSummoner contract
         // Regular external call to different contract (not self-call)
-        baal = baalSummoner.summonBaal(actualInitParams, initializationActions, sharesSalt, lootSalt, baalSalt);
+        baal = baalSummoner.summonBaal(actualInitParams, initializationActions, shareTokenName, shareTokenSymbol, lootTokenName, lootTokenSymbol, sharesSalt, lootSalt, baalSalt);
 
         // Get deployed token addresses from Baal
         (address shares, address loot) = _getTokenAddresses(baal);

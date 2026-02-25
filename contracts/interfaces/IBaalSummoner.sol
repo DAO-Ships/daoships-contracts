@@ -38,6 +38,10 @@ interface IBaalSummoner {
      * @dev Deploys clones and initializes with provided parameters
      * @param initializationParams Encoded initialization data (see Baal.setUp)
      * @param initializationActions Optional setup actions to execute (e.g., setGuildTokens)
+     * @param shareTokenName Name for the shares token (e.g., "My DAO Shares")
+     * @param shareTokenSymbol Symbol for the shares token (e.g., "MDAO")
+     * @param lootTokenName Name for the loot token (e.g., "My DAO Loot")
+     * @param lootTokenSymbol Symbol for the loot token (e.g., "MDAO-LOOT")
      * @param sharesSalt Create2 salt for SharesERC20 clone
      * @param lootSalt Create2 salt for LootERC20 clone
      * @param baalSalt Create2 salt for Baal clone
@@ -46,6 +50,10 @@ interface IBaalSummoner {
     function summonBaal(
         bytes calldata initializationParams,
         bytes[] calldata initializationActions,
+        string calldata shareTokenName,
+        string calldata shareTokenSymbol,
+        string calldata lootTokenName,
+        string calldata lootTokenSymbol,
         uint256 sharesSalt,
         uint256 lootSalt,
         uint256 baalSalt

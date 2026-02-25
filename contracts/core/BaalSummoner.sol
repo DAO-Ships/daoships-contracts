@@ -91,6 +91,10 @@ contract BaalSummoner {
      * @dev Deploys clones and initializes with provided parameters
      * @param initializationParams Encoded initialization data (see Baal.setUp)
      * @param initializationActions Optional setup actions to execute (e.g., setGuildTokens)
+     * @param shareTokenName Name for the shares token (e.g., "My DAO Shares")
+     * @param shareTokenSymbol Symbol for the shares token (e.g., "MDAO")
+     * @param lootTokenName Name for the loot token (e.g., "My DAO Loot")
+     * @param lootTokenSymbol Symbol for the loot token (e.g., "MDAO-LOOT")
      * @param sharesSalt Create2 salt for SharesERC20 clone
      * @param lootSalt Create2 salt for LootERC20 clone
      * @param baalSalt Create2 salt for Baal clone
@@ -99,6 +103,10 @@ contract BaalSummoner {
     function summonBaal(
         bytes calldata initializationParams,
         bytes[] calldata initializationActions,
+        string calldata shareTokenName,
+        string calldata shareTokenSymbol,
+        string calldata lootTokenName,
+        string calldata lootTokenSymbol,
         uint256 sharesSalt,
         uint256 lootSalt,
         uint256 baalSalt
@@ -133,9 +141,9 @@ contract BaalSummoner {
         // Deploy Baal clone
         baal = payable(Clones.cloneDeterministic(baalSingleton, keccak256(abi.encodePacked(msg.sender, baalSalt))));
 
-        // Initialize token clones with Baal as owner
-        SharesERC20(shares).initialize(baal);
-        LootERC20(loot).initialize(baal);
+        // Initialize token clones with Baal as owner and custom metadata
+        SharesERC20(shares).initialize(baal, shareTokenName, shareTokenSymbol);
+        LootERC20(loot).initialize(baal, lootTokenName, lootTokenSymbol);
 
         // Encode initialization params with actual token addresses
         bytes memory actualInitParams = abi.encode(

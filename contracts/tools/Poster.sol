@@ -49,7 +49,7 @@ contract Poster {
      * @param tag Category or identifier (e.g., "proposal", "profile", "announcement")
      *
      * Examples:
-     * - tag: "daoProfile", content: '{"name":"My DAO","description":"..."}'
+     * - tag: "qdl.summoner.daoProfile", content: '{"name":"My DAO","description":"..."}'
      * - tag: "proposal", content: 'ipfs://QmXxx...' (IPFS hash)
      * - tag: "announcement", content: "New feature launched!"
      */

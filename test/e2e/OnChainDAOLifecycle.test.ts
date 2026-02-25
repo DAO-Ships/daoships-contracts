@@ -107,11 +107,17 @@ function encodeMultiSend(transactions: Array<{
  * Run with: npm run test:e2e:onchain
  *
  * Note: This test triggers ALL core Baal events for complete indexer integration testing.
- *       Total runtime: ~12-15 minutes including voting waits for governance proposals.
+ *       Total runtime scales with VOTING_PERIOD and GRACE_PERIOD env vars (timeout auto-calculated).
  */
 
 describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
-  this.timeout(900000); // 15 minutes total (salt mining + multiple voting waits + transactions)
+  // Dynamic timeout: 4 proposals × (voting + grace + 20s checkpoint + 30s buffer) + 5min base overhead
+  const votingPeriodSec = parseInt(process.env.VOTING_PERIOD || "3600");
+  const gracePeriodSec = parseInt(process.env.GRACE_PERIOD || "60");
+  const perProposalMs = (votingPeriodSec + gracePeriodSec + 50) * 1000;
+  const baseOverheadMs = 300000; // 5 minutes for salt mining, deployments, non-proposal phases
+  const dynamicTimeout = (4 * perProposalMs) + baseOverheadMs;
+  this.timeout(dynamicTimeout);
 
   let provider: quais.JsonRpcProvider;
   let deployer: quais.Wallet;
@@ -250,7 +256,8 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   before(async function () {
     console.log("\n╔══════════════════════════════════════════════════════════════╗");
     console.log("║  Complete DAO Lifecycle E2E Test (With DAO Summoning)       ║");
-    console.log("╚══════════════════════════════════════════════════════════════╝\n");
+    console.log("╚══════════════════════════════════════════════════════════════╝");
+    console.log(`   Voting: ${votingPeriodSec}s | Grace: ${gracePeriodSec}s | Timeout: ${Math.round(dynamicTimeout / 60000)}min\n`);
 
     // Load ABIs
     const artifactsDir = path.join(__dirname, "../../artifacts/contracts");
@@ -615,6 +622,10 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
       await summoner.summonBaalAndVault.staticCall(
         initializationParams,
         [], // no initialization actions
+        "Test DAO Shares",
+        "TDAO",
+        "Test DAO Loot",
+        "TDAO-LOOT",
         vaultOwners,
         vaultThreshold,
         BigInt(vaultSalt.salt),
@@ -632,6 +643,10 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     const tx = await summoner.summonBaalAndVault(
       initializationParams,
       [], // no initialization actions
+      "Test DAO Shares",
+      "TDAO",
+      "Test DAO Loot",
+      "TDAO-LOOT",
       vaultOwners,
       vaultThreshold,
       BigInt(vaultSalt.salt),
@@ -1497,11 +1512,13 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     ]);
 
     // 2. GovernanceConfigSet - update quorum to 15%
+    const votingPeriod = parseInt(process.env.VOTING_PERIOD || "3600"); // Must meet MIN_VOTING_PERIOD (1 hour)
+    const gracePeriod = parseInt(process.env.GRACE_PERIOD || "30");
     const newGovernanceConfig = quais.AbiCoder.defaultAbiCoder().encode(
       ["uint32", "uint32", "uint256", "uint256", "uint256", "uint256"],
       [
-        60,  // voting period (unchanged)
-        30,  // grace period (unchanged)
+        votingPeriod,  // voting period (unchanged - from env)
+        gracePeriod,   // grace period (unchanged - from env)
         quais.parseQuai("0.001"),  // proposal offering (unchanged)
         1500,  // quorum 15% (changed from 20%)
         quais.parseQuai("1"),  // sponsor threshold (unchanged)
@@ -1613,9 +1630,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     await vote2.wait();
     console.log(`   ✅ Alice voted YES\n`);
 
-    // Wait for voting + grace period
-    const votingPeriod = parseInt(process.env.VOTING_PERIOD || "3600"); // 1 hour minimum (M-7 fix)
-    const gracePeriod = parseInt(process.env.GRACE_PERIOD || "30");
+    // Wait for voting + grace period (reuse votingPeriod/gracePeriod from governance config above)
     const totalWait = votingPeriod + gracePeriod;
 
     console.log(`⏰ Waiting for voting + grace period (${totalWait}s)...`);

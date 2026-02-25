@@ -370,6 +370,10 @@ async function main() {
     const tx = await summoner.summonBaalAndVault(
       initializationParams,
       [], // no initialization actions
+      process.env.SHARE_TOKEN_NAME || "DAO Shares",
+      process.env.SHARE_TOKEN_SYMBOL || "SHARES",
+      process.env.LOOT_TOKEN_NAME || "DAO Loot",
+      process.env.LOOT_TOKEN_SYMBOL || "LOOT",
       vaultOwners,
       vaultThreshold,
       BigInt(vault.salt),

@@ -20,23 +20,31 @@ import "@openzeppelin/contracts/access/Ownable.sol";
  * - Owner-controlled: Only Baal contract (owner) can mint/burn
  */
 contract SharesERC20 is BaalVotes, ERC20Pausable, Ownable, IBaalToken {
+    /// @dev Custom name/symbol storage for EIP-1167 clones (OZ ERC20._name/_symbol are private)
+    string private _customName;
+    string private _customSymbol;
+
     /**
      * @notice Constructor for singleton deployment
      * @dev Sets deployer as initial owner
      *      For EIP-1167 clones, storage is empty so owner() returns address(0)
-     *      Clones must call initialize() to set owner
+     *      Clones must call initialize() to set owner and token metadata
      */
     constructor() ERC20("Baal Shares", "SHARES") Ownable(msg.sender) {}
 
     /**
-     * @notice Initialize token clone with owner
+     * @notice Initialize token clone with owner and metadata
      * @dev Only works for clones (where owner is address(0) due to empty storage)
-     *      For direct deployments, owner is already set by constructor
+     *      Sets custom name/symbol since OZ ERC20 constructor only runs on singleton
      * @param _initialOwner Address to set as owner (Baal contract)
+     * @param tokenName Custom token name for this clone
+     * @param tokenSymbol Custom token symbol for this clone
      */
-    function initialize(address _initialOwner) external {
+    function initialize(address _initialOwner, string calldata tokenName, string calldata tokenSymbol) external {
         require(owner() == address(0), "SharesERC20: already initialized");
         _transferOwnership(_initialOwner);
+        _customName = tokenName;
+        _customSymbol = tokenSymbol;
     }
 
     /**
@@ -91,7 +99,7 @@ contract SharesERC20 is BaalVotes, ERC20Pausable, Ownable, IBaalToken {
      * @return Token name string
      */
     function name() public view override(ERC20, IBaalToken) returns (string memory) {
-        return super.name();
+        return bytes(_customName).length > 0 ? _customName : super.name();
     }
 
     /**
@@ -99,7 +107,7 @@ contract SharesERC20 is BaalVotes, ERC20Pausable, Ownable, IBaalToken {
      * @return Token symbol string
      */
     function symbol() public view override(ERC20, IBaalToken) returns (string memory) {
-        return super.symbol();
+        return bytes(_customSymbol).length > 0 ? _customSymbol : super.symbol();
     }
 
     /**
