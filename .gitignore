@@ -12,10 +12,11 @@ metadata/
 *.tsbuildinfo
 
 # Environment files (NEVER commit secrets)
+# Ignore all .env files except templates
 .env
-.env.local
-.env.e2e
-# Note: .env.example and .env.e2e.example ARE committed as templates
+.env.*
+!.env.example
+!.env.e2e.example
 
 # Coverage
 coverage/

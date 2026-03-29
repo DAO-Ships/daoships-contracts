@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 
 /**
- * Deploy singleton implementations for Baal, SharesERC20, and LootERC20
+ * Deploy singleton implementations for DAOShip, SharesERC20, and LootERC20
  * These are template contracts that will be cloned via EIP-1167
  */
 async function main() {
@@ -28,13 +28,13 @@ async function main() {
   const lootAddress = await lootSingleton.getAddress();
   console.log("✅ LootERC20 singleton:", lootAddress);
 
-  // Deploy Baal singleton
-  console.log("\n3. Deploying Baal singleton...");
-  const Baal = await ethers.getContractFactory("Baal");
-  const baalSingleton = await Baal.deploy();
-  await baalSingleton.waitForDeployment();
-  const baalAddress = await baalSingleton.getAddress();
-  console.log("✅ Baal singleton:", baalAddress);
+  // Deploy DAOShip singleton
+  console.log("\n3. Deploying DAOShip singleton...");
+  const DAOShip = await ethers.getContractFactory("DAOShip");
+  const daoShipSingleton = await DAOShip.deploy();
+  await daoShipSingleton.waitForDeployment();
+  const daoShipAddress = await daoShipSingleton.getAddress();
+  console.log("✅ DAOShip singleton:", daoShipAddress);
 
   // Save deployment info
   const deploymentInfo = {
@@ -51,9 +51,9 @@ async function main() {
         address: lootAddress,
         blockNumber: lootSingleton.deploymentTransaction()?.blockNumber || 0,
       },
-      BaalSingleton: {
-        address: baalAddress,
-        blockNumber: baalSingleton.deploymentTransaction()?.blockNumber || 0,
+      DAOShipSingleton: {
+        address: daoShipAddress,
+        blockNumber: daoShipSingleton.deploymentTransaction()?.blockNumber || 0,
       },
     },
   };
@@ -77,15 +77,15 @@ async function main() {
   console.log("\n📋 Summary:");
   console.log(`   SharesERC20: ${sharesAddress}`);
   console.log(`   LootERC20:   ${lootAddress}`);
-  console.log(`   Baal:        ${baalAddress}`);
+  console.log(`   DAOShip:     ${daoShipAddress}`);
 
   return {
     sharesSingleton,
     sharesAddress,
     lootSingleton,
     lootAddress,
-    baalSingleton,
-    baalAddress,
+    daoShipSingleton,
+    daoShipAddress,
   };
 }
 

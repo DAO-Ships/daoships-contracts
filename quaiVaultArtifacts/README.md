@@ -1,26 +1,26 @@
 # Quai Vault Artifacts
 
-This folder contains compiled artifacts from the Quai Vault contracts, used by the DAO summoning script for vault creation and address prediction.
+This folder contains compiled artifacts from the Quai Vault contracts, used by the DAO launching script for vault creation and address prediction.
 
 ## Files
 
 | File | Description | Source |
 |------|-------------|--------|
-| `QuaiVault.json` | QuaiVault implementation contract ABI and bytecode | [quaivault-contracts](https://github.com/Quai-Vault/quaivault-contracts) |
+| `QuaiVault.json` | QuaiVault v2 implementation contract ABI and bytecode | [quaivault-contracts](https://github.com/Quai-Vault/quaivault-contracts) |
 | `QuaiVaultProxy.json` | QuaiVaultProxy (EIP-1967) ABI and bytecode | [quaivault-contracts](https://github.com/Quai-Vault/quaivault-contracts) |
-| `MultiSend.json` | MultiSend library for batched proposal execution | [quaivault-contracts](https://github.com/Quai-Vault/quaivault-contracts) |
+| `MultiSend.json` | MultiSendCallOnly library for batched proposal execution (rejects DelegateCall sub-transactions) | [quaivault-contracts](https://github.com/Quai-Vault/quaivault-contracts) |
 
 ## Purpose
 
-These artifacts are used by `scripts/summon-dao.ts` to:
+These artifacts are used by `scripts/create-dao.ts` to:
 
 1. **Calculate CREATE2 addresses** for vault deployment
-2. **Encode initialization data** for vault setup (owners, threshold)
+2. **Encode initialization data** for vault setup (owners, threshold, minExecutionDelay, initialModules, delegatecallAllowed targets)
 3. **Mine salts** that produce Cyprus1 shard addresses (`0x00` prefix)
 
 ## Usage
 
-The summon script loads these artifacts to predict the vault address before deployment:
+The launch script loads these artifacts to predict the vault address before deployment:
 
 ```typescript
 // Load Quai Vault artifacts
@@ -33,7 +33,7 @@ const QuaiVaultProxyJson = JSON.parse(
 
 // Prepare vault initialization data
 const vaultIface = new quais.Interface(QuaiVaultJson.abi);
-const initData = vaultIface.encodeFunctionData("initialize", [owners, threshold]);
+const initData = vaultIface.encodeFunctionData("initialize", [owners, threshold, 0, [predictedDAOShipAddress], [multisendCallOnlyAddress]]);
 
 // Calculate CREATE2 address
 const encodedArgs = quais.AbiCoder.defaultAbiCoder().encode(
@@ -50,7 +50,7 @@ const predictedAddress = quais.getCreate2Address(factory, salt, bytecodeHash);
 These artifacts are copied from the Quai Vault repository:
 
 - **Repository**: [github.com/Quai-Vault/quaivault-contracts](https://github.com/Quai-Vault/quaivault-contracts)
-- **Commit**: Latest stable release
+- **Commit**: QuaiVault v2 (delegatecallAllowed whitelist + initialModules + MultiSendCallOnly)
 - **License**: MIT
 
 ## Updating
@@ -62,9 +62,9 @@ If Quai Vault contracts are updated, regenerate these artifacts:
 npm run compile
 
 # Copy updated artifacts:
-cp artifacts/contracts/QuaiVault.sol/QuaiVault.json ../qdl-contracts/quaiVaultArtifacts/
-cp artifacts/contracts/QuaiVaultProxy.sol/QuaiVaultProxy.json ../qdl-contracts/quaiVaultArtifacts/
-cp artifacts/contracts/libraries/MultiSend.sol/MultiSend.json ../qdl-contracts/quaiVaultArtifacts/
+cp artifacts/contracts/QuaiVault.sol/QuaiVault.json ../daoships-contracts/quaiVaultArtifacts/
+cp artifacts/contracts/QuaiVaultProxy.sol/QuaiVaultProxy.json ../daoships-contracts/quaiVaultArtifacts/
+cp artifacts/contracts/libraries/MultiSendCallOnly.sol/MultiSendCallOnly.json ../daoships-contracts/quaiVaultArtifacts/MultiSend.json
 ```
 
 **Important**: Ensure the artifacts match the deployed contracts on the network (Cyprus1):
@@ -74,7 +74,7 @@ cp artifacts/contracts/libraries/MultiSend.sol/MultiSend.json ../qdl-contracts/q
 
 ## Why Local Copies?
 
-Including these artifacts locally makes `qdl-contracts` standalone - users don't need to clone the Quai Vault repository to summon DAOs. This simplifies:
+Including these artifacts locally makes `daoships-contracts` standalone - users don't need to clone the Quai Vault repository to create DAOs. This simplifies:
 
 - Development setup (fewer dependencies)
 - CI/CD pipelines (no external repo clones)
@@ -83,5 +83,15 @@ Including these artifacts locally makes `qdl-contracts` standalone - users don't
 
 ---
 
-**Last Updated**: 2026-02-10
-**Quai Vault Version**: v1.0.0 (or specific commit hash)
+**Last Updated**: 2026-03-19
+**Quai Vault Version**: v2 (delegatecallAllowed whitelist + initialModules + MultiSendCallOnly)
+
+## Key Changes in QuaiVault v2
+
+- `delegatecallDisabled` boolean replaced by `delegatecallAllowed(address)` per-target whitelist mapping
+- `createWallet` accepts `initialModules` array — modules are enabled atomically during vault creation
+- `DAOShipAndVaultLauncher` uses predict-then-create: predicts DAOShip address, passes it as `initialModules=[predictedDAOShip]`
+- MultiSendCallOnly replaces MultiSend as the default library — rejects `operation=1` (DelegateCall) sub-transactions
+- `delegatecallAllowed[multisendCallOnly]` is set to `true` during vault creation
+- ERC1967 implementation slot guard on DelegateCall operations
+- Revert data propagation in MultiSendCallOnly

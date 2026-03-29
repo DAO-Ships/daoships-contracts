@@ -10,7 +10,7 @@ import "../libraries/Enum.sol";
  * @dev See: https://github.com/gnosis/zodiac/blob/master/contracts/interfaces/IAvatar.sol
  *
  * This interface defines the Zodiac IAvatar standard, enabling compatibility with:
- * - Moloch V3 (Baal) DAOs
+ * - DAO Ships DAOs
  * - OpenZeppelin Governor modules
  * - Zodiac Modifiers (Delay, Roles, Scope)
  * - Safe App and DAOhaus UIs
@@ -40,10 +40,12 @@ import "../libraries/Enum.sol";
 interface IAvatar {
     /// @notice Emitted when a module is enabled
     /// @param module Address of the enabled module
+    /// @dev QuaiVault emits this with `indexed` — we match the implementation, not upstream Zodiac
     event EnabledModule(address indexed module);
 
     /// @notice Emitted when a module is disabled
     /// @param module Address of the disabled module
+    /// @dev QuaiVault emits this with `indexed` — we match the implementation, not upstream Zodiac
     event DisabledModule(address indexed module);
 
     /// @notice Emitted when module execution succeeds
@@ -106,7 +108,7 @@ interface IAvatar {
     function execTransactionFromModule(
         address to,
         uint256 value,
-        bytes memory data,
+        bytes calldata data,
         Enum.Operation operation
     ) external returns (bool success);
 
@@ -124,7 +126,7 @@ interface IAvatar {
     function execTransactionFromModuleReturnData(
         address to,
         uint256 value,
-        bytes memory data,
+        bytes calldata data,
         Enum.Operation operation
     ) external returns (bool success, bytes memory returnData);
 }
@@ -175,6 +177,6 @@ interface ISimpleModuleExecutor {
     function execTransactionFromModule(
         address to,
         uint256 value,
-        bytes memory data
+        bytes calldata data
     ) external returns (bool success);
 }

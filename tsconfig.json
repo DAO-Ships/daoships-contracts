@@ -11,8 +11,8 @@
     "moduleResolution": "node",
     "outDir": "./dist",
     "rootDir": "./",
-    "typeRoots": ["./node_modules/@types", "./typechain-types"]
+    "typeRoots": ["./node_modules/@types"]
   },
   "include": ["./scripts", "./test", "./deploy", "./typechain-types"],
-  "files": ["./hardhat.config.ts"]
+  "files": ["./hardhat.config.ts", "./hardhat-env.d.ts"]
 }

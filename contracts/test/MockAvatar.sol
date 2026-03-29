@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
 import "../interfaces/IAvatar.sol";
@@ -38,7 +38,7 @@ contract MockAvatar is IAvatar {
     /// @notice Get modules paginated (mock implementation)
     function getModulesPaginated(address, uint256)
         external
-        view
+        pure
         override
         returns (address[] memory array, address next)
     {
@@ -51,7 +51,7 @@ contract MockAvatar is IAvatar {
     function execTransactionFromModule(
         address to,
         uint256 value,
-        bytes memory data,
+        bytes calldata data,
         Enum.Operation operation
     ) external override returns (bool success) {
         require(modules[msg.sender], "MockAvatar: not enabled module");
@@ -76,7 +76,7 @@ contract MockAvatar is IAvatar {
     function execTransactionFromModuleReturnData(
         address to,
         uint256 value,
-        bytes memory data,
+        bytes calldata data,
         Enum.Operation operation
     ) external override returns (bool success, bytes memory returnData) {
         require(modules[msg.sender], "MockAvatar: not enabled module");

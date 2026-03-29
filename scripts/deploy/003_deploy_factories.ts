@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 
 /**
- * Deploy BaalSummoner and BaalAndVaultSummoner factories
+ * Deploy DAOShipLauncher and DAOShipAndVaultLauncher factories
  * Requires singleton addresses from previous deployment
  */
 async function main() {
@@ -30,53 +30,53 @@ async function main() {
     fs.readFileSync(path.join(deploymentsDir, singletonFile), "utf-8")
   );
 
-  const baalSingleton = singletonData.contracts.BaalSingleton.address;
+  const daoShipSingleton = singletonData.contracts.DAOShipSingleton.address;
   const sharesSingleton = singletonData.contracts.SharesERC20Singleton.address;
   const lootSingleton = singletonData.contracts.LootERC20Singleton.address;
 
   console.log("\n📦 Using singletons:");
-  console.log(`   Baal:   ${baalSingleton}`);
-  console.log(`   Shares: ${sharesSingleton}`);
-  console.log(`   Loot:   ${lootSingleton}`);
+  console.log(`   DAOShip: ${daoShipSingleton}`);
+  console.log(`   Shares:  ${sharesSingleton}`);
+  console.log(`   Loot:    ${lootSingleton}`);
 
-  // Deploy BaalSummoner
-  console.log("\n1. Deploying BaalSummoner...");
-  const BaalSummoner = await ethers.getContractFactory("BaalSummoner");
-  const baalSummoner = await BaalSummoner.deploy(
-    baalSingleton,
+  // Deploy DAOShipLauncher
+  console.log("\n1. Deploying DAOShipLauncher...");
+  const DAOShipLauncher = await ethers.getContractFactory("DAOShipLauncher");
+  const daoShipLauncher = await DAOShipLauncher.deploy(
+    daoShipSingleton,
     sharesSingleton,
     lootSingleton
   );
-  await baalSummoner.waitForDeployment();
-  const baalSummonerAddress = await baalSummoner.getAddress();
-  console.log("✅ BaalSummoner deployed:", baalSummonerAddress);
+  await daoShipLauncher.waitForDeployment();
+  const daoShipLauncherAddress = await daoShipLauncher.getAddress();
+  console.log("✅ DAOShipLauncher deployed:", daoShipLauncherAddress);
 
   // Get QuaiVaultFactory address from env
   const quaiVaultFactory = process.env.QUAI_VAULT_FACTORY;
   if (!quaiVaultFactory) {
     console.warn(
-      "\n⚠️  QUAI_VAULT_FACTORY not set in .env, skipping BaalAndVaultSummoner"
+      "\n⚠️  QUAI_VAULT_FACTORY not set in .env, skipping DAOShipAndVaultLauncher"
     );
-    console.warn("   Set QUAI_VAULT_FACTORY to deploy integrated summoner");
+    console.warn("   Set QUAI_VAULT_FACTORY to deploy integrated launcher");
   } else {
-    // Deploy BaalAndVaultSummoner
-    console.log("\n2. Deploying BaalAndVaultSummoner...");
-    console.log(`   Using BaalSummoner: ${baalSummonerAddress}`);
+    // Deploy DAOShipAndVaultLauncher
+    console.log("\n2. Deploying DAOShipAndVaultLauncher...");
+    console.log(`   Using DAOShipLauncher: ${daoShipLauncherAddress}`);
     console.log(`   Using QuaiVaultFactory: ${quaiVaultFactory}`);
 
-    const BaalAndVaultSummoner = await ethers.getContractFactory(
-      "BaalAndVaultSummoner"
+    const DAOShipAndVaultLauncher = await ethers.getContractFactory(
+      "DAOShipAndVaultLauncher"
     );
-    const baalAndVaultSummoner = await BaalAndVaultSummoner.deploy(
-      baalSummonerAddress,
+    const daoShipAndVaultLauncher = await DAOShipAndVaultLauncher.deploy(
+      daoShipLauncherAddress,
       quaiVaultFactory
     );
-    await baalAndVaultSummoner.waitForDeployment();
-    const baalAndVaultSummonerAddress =
-      await baalAndVaultSummoner.getAddress();
+    await daoShipAndVaultLauncher.waitForDeployment();
+    const daoShipAndVaultLauncherAddress =
+      await daoShipAndVaultLauncher.getAddress();
     console.log(
-      "✅ BaalAndVaultSummoner deployed:",
-      baalAndVaultSummonerAddress
+      "✅ DAOShipAndVaultLauncher deployed:",
+      daoShipAndVaultLauncherAddress
     );
 
     // Save deployment info
@@ -86,18 +86,18 @@ async function main() {
       timestamp: Date.now(),
       deployer: deployer.address,
       contracts: {
-        BaalSummoner: {
-          address: baalSummonerAddress,
-          blockNumber: baalSummoner.deploymentTransaction()?.blockNumber || 0,
+        DAOShipLauncher: {
+          address: daoShipLauncherAddress,
+          blockNumber: daoShipLauncher.deploymentTransaction()?.blockNumber || 0,
         },
-        BaalAndVaultSummoner: {
-          address: baalAndVaultSummonerAddress,
+        DAOShipAndVaultLauncher: {
+          address: daoShipAndVaultLauncherAddress,
           blockNumber:
-            baalAndVaultSummoner.deploymentTransaction()?.blockNumber || 0,
+            daoShipAndVaultLauncher.deploymentTransaction()?.blockNumber || 0,
         },
       },
       references: {
-        BaalSingleton: baalSingleton,
+        DAOShipSingleton: daoShipSingleton,
         SharesERC20Singleton: sharesSingleton,
         LootERC20Singleton: lootSingleton,
         QuaiVaultFactory: quaiVaultFactory,
@@ -115,9 +115,9 @@ async function main() {
 
     console.log("\n✨ All factories deployed successfully!");
     console.log("\n📋 Summary:");
-    console.log(`   BaalSummoner:         ${baalSummonerAddress}`);
+    console.log(`   DAOShipLauncher:         ${daoShipLauncherAddress}`);
     console.log(
-      `   BaalAndVaultSummoner: ${baalAndVaultSummonerAddress}`
+      `   DAOShipAndVaultLauncher: ${daoShipAndVaultLauncherAddress}`
     );
   }
 }

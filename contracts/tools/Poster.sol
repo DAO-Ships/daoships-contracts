@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
 /**
@@ -49,7 +49,7 @@ contract Poster {
      * @param tag Category or identifier (e.g., "proposal", "profile", "announcement")
      *
      * Examples:
-     * - tag: "qdl.summoner.daoProfile", content: '{"name":"My DAO","description":"..."}'
+     * - tag: "daoships.launcher.daoProfile", content: '{"name":"My DAO","description":"..."}'
      * - tag: "proposal", content: 'ipfs://QmXxx...' (IPFS hash)
      * - tag: "announcement", content: "New feature launched!"
      */

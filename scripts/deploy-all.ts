@@ -8,15 +8,15 @@ import { HttpNetworkConfig } from "hardhat/types";
 const PosterJson = require("../artifacts/contracts/tools/Poster.sol/Poster.json");
 const SharesERC20Json = require("../artifacts/contracts/tokens/SharesERC20.sol/SharesERC20.json");
 const LootERC20Json = require("../artifacts/contracts/tokens/LootERC20.sol/LootERC20.json");
-const BaalJson = require("../artifacts/contracts/core/Baal.sol/Baal.json");
-const BaalSummonerJson = require("../artifacts/contracts/core/BaalSummoner.sol/BaalSummoner.json");
-const BaalAndVaultSummonerJson = require("../artifacts/contracts/core/BaalAndVaultSummoner.sol/BaalAndVaultSummoner.json");
+const DAOShipJson = require("../artifacts/contracts/core/DAOShip.sol/DAOShip.json");
+const DAOShipLauncherJson = require("../artifacts/contracts/core/DAOShipLauncher.sol/DAOShipLauncher.json");
+const DAOShipAndVaultLauncherJson = require("../artifacts/contracts/core/DAOShipAndVaultLauncher.sol/DAOShipAndVaultLauncher.json");
 
 /**
  * Deploy all contracts in sequence
  * 1. Poster
- * 2. Singletons (Baal, SharesERC20, LootERC20)
- * 3. Factories (BaalSummoner, BaalAndVaultSummoner)
+ * 2. Singletons (DAOShip, SharesERC20, LootERC20)
+ * 3. Factories (DAOShipLauncher, DAOShipAndVaultLauncher)
  */
 async function main() {
   console.log("=".repeat(60));
@@ -137,93 +137,99 @@ async function main() {
   console.log("Transaction hash:", lootSingleton.deploymentTransaction()?.hash);
   console.log("✅ LootERC20:", deployedContracts.LootERC20Singleton);
 
-  console.log("\n📦 Baal Singleton...");
-  const baalIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(
-    BaalJson.bytecode
+  console.log("\n📦 DAOShip Singleton...");
+  const daoShipIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(
+    DAOShipJson.bytecode
   );
-  console.log("Metadata IPFS hash:", baalIpfsHash);
-  ipfsHashes.BaalSingleton = baalIpfsHash;
+  console.log("Metadata IPFS hash:", daoShipIpfsHash);
+  ipfsHashes.DAOShipSingleton = daoShipIpfsHash;
 
-  const Baal = new quais.ContractFactory(
-    BaalJson.abi,
-    BaalJson.bytecode,
+  const DAOShip = new quais.ContractFactory(
+    DAOShipJson.abi,
+    DAOShipJson.bytecode,
     wallet,
-    baalIpfsHash
+    daoShipIpfsHash
   );
 
-  const baalSingleton = await Baal.deploy();
-  await baalSingleton.waitForDeployment();
-  deployedContracts.BaalSingleton = await baalSingleton.getAddress();
-  console.log("Transaction hash:", baalSingleton.deploymentTransaction()?.hash);
-  console.log("✅ Baal:", deployedContracts.BaalSingleton);
+  const daoShipSingleton = await DAOShip.deploy();
+  await daoShipSingleton.waitForDeployment();
+  deployedContracts.DAOShipSingleton = await daoShipSingleton.getAddress();
+  console.log("Transaction hash:", daoShipSingleton.deploymentTransaction()?.hash);
+  console.log("✅ DAOShip:", deployedContracts.DAOShipSingleton);
 
   // 3. Deploy Factories
   console.log("\n" + "=".repeat(60));
   console.log("STEP 3: Deploying Factories");
   console.log("=".repeat(60));
 
-  console.log("\n🏭 BaalSummoner...");
-  const summonerIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(
-    BaalSummonerJson.bytecode
+  console.log("\n🏭 DAOShipLauncher...");
+  const launcherIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(
+    DAOShipLauncherJson.bytecode
   );
-  console.log("Metadata IPFS hash:", summonerIpfsHash);
-  ipfsHashes.BaalSummoner = summonerIpfsHash;
+  console.log("Metadata IPFS hash:", launcherIpfsHash);
+  ipfsHashes.DAOShipLauncher = launcherIpfsHash;
 
-  const BaalSummoner = new quais.ContractFactory(
-    BaalSummonerJson.abi,
-    BaalSummonerJson.bytecode,
+  const DAOShipLauncher = new quais.ContractFactory(
+    DAOShipLauncherJson.abi,
+    DAOShipLauncherJson.bytecode,
     wallet,
-    summonerIpfsHash
+    launcherIpfsHash
   );
 
-  const baalSummoner = await BaalSummoner.deploy(
-    deployedContracts.BaalSingleton,
+  const daoShipLauncher = await DAOShipLauncher.deploy(
+    deployedContracts.DAOShipSingleton,
     deployedContracts.SharesERC20Singleton,
     deployedContracts.LootERC20Singleton
   );
-  await baalSummoner.waitForDeployment();
-  deployedContracts.BaalSummoner = await baalSummoner.getAddress();
-  console.log("Transaction hash:", baalSummoner.deploymentTransaction()?.hash);
-  console.log("✅ BaalSummoner:", deployedContracts.BaalSummoner);
+  await daoShipLauncher.waitForDeployment();
+  deployedContracts.DAOShipLauncher = await daoShipLauncher.getAddress();
+  console.log("Transaction hash:", daoShipLauncher.deploymentTransaction()?.hash);
+  console.log("✅ DAOShipLauncher:", deployedContracts.DAOShipLauncher);
 
-  // Deploy BaalAndVaultSummoner if QuaiVaultFactory is set
+  // Deploy DAOShipAndVaultLauncher if QuaiVaultFactory is set
   const quaiVaultFactory = process.env.QUAI_VAULT_FACTORY;
+  const multisendCallOnly = process.env.MULTISEND_CALL_ONLY;
   if (quaiVaultFactory) {
-    console.log("\n🏭 BaalAndVaultSummoner...");
-    console.log(`   Using BaalSummoner: ${deployedContracts.BaalSummoner}`);
+    if (!multisendCallOnly) {
+      throw new Error("MULTISEND_CALL_ONLY address required for DAOShipAndVaultLauncher deployment");
+    }
+    console.log("\n🏭 DAOShipAndVaultLauncher...");
+    console.log(`   Using DAOShipLauncher: ${deployedContracts.DAOShipLauncher}`);
     console.log(`   Using QuaiVaultFactory: ${quaiVaultFactory}`);
+    console.log(`   Using MultiSendCallOnly: ${multisendCallOnly}`);
 
-    const vaultSummonerIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(
-      BaalAndVaultSummonerJson.bytecode
+    const vaultLauncherIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(
+      DAOShipAndVaultLauncherJson.deployedBytecode
     );
-    console.log("Metadata IPFS hash:", vaultSummonerIpfsHash);
-    ipfsHashes.BaalAndVaultSummoner = vaultSummonerIpfsHash;
+    console.log("Metadata IPFS hash:", vaultLauncherIpfsHash);
+    ipfsHashes.DAOShipAndVaultLauncher = vaultLauncherIpfsHash;
 
-    const BaalAndVaultSummoner = new quais.ContractFactory(
-      BaalAndVaultSummonerJson.abi,
-      BaalAndVaultSummonerJson.bytecode,
+    const DAOShipAndVaultLauncher = new quais.ContractFactory(
+      DAOShipAndVaultLauncherJson.abi,
+      DAOShipAndVaultLauncherJson.bytecode,
       wallet,
-      vaultSummonerIpfsHash
+      vaultLauncherIpfsHash
     );
 
-    const baalAndVaultSummoner = await BaalAndVaultSummoner.deploy(
-      deployedContracts.BaalSummoner,
-      quaiVaultFactory
+    const daoShipAndVaultLauncher = await DAOShipAndVaultLauncher.deploy(
+      deployedContracts.DAOShipLauncher,
+      quaiVaultFactory,
+      multisendCallOnly
     );
-    await baalAndVaultSummoner.waitForDeployment();
-    deployedContracts.BaalAndVaultSummoner =
-      await baalAndVaultSummoner.getAddress();
+    await daoShipAndVaultLauncher.waitForDeployment();
+    deployedContracts.DAOShipAndVaultLauncher =
+      await daoShipAndVaultLauncher.getAddress();
     console.log(
       "Transaction hash:",
-      baalAndVaultSummoner.deploymentTransaction()?.hash
+      daoShipAndVaultLauncher.deploymentTransaction()?.hash
     );
     console.log(
-      "✅ BaalAndVaultSummoner:",
-      deployedContracts.BaalAndVaultSummoner
+      "✅ DAOShipAndVaultLauncher:",
+      deployedContracts.DAOShipAndVaultLauncher
     );
   } else {
     console.warn(
-      "\n⚠️  Skipping BaalAndVaultSummoner (QUAI_VAULT_FACTORY not set)"
+      "\n⚠️  Skipping DAOShipAndVaultLauncher (QUAI_VAULT_FACTORY not set)"
     );
   }
 
@@ -241,7 +247,7 @@ async function main() {
     ipfsHashes: ipfsHashes,
     references: {
       QuaiVaultFactory: quaiVaultFactory || "NOT_SET",
-      MultiSend: process.env.MULTISEND_LIBRARY || "NOT_SET",
+      MultiSendCallOnly: multisendCallOnly || "NOT_SET",
     },
   };
 
@@ -277,13 +283,13 @@ async function main() {
   console.log("\n📝 Next Steps:");
   console.log("   1. Run: npm run update-env");
   console.log("      (Updates .env and .env.e2e with deployed addresses)");
-  console.log("\n   2. (Optional) Deploy shamans: npm run deploy:shamans");
-  console.log("      (OnboarderShaman, EthOnboarderShaman, CheckInShamanV2)");
+  console.log("\n   2. (Optional) Deploy navigators: npm run deploy:navigators");
+  console.log("      (OnboarderNavigator, ERC20TributeNavigator)");
   console.log("      Then run: npm run update-env again");
   console.log("\n   3. Verify contracts on block explorer (if available)");
   console.log("   4. Update indexer configuration with contract addresses");
   console.log("   5. Test deployment with: npm run test:integration");
-  console.log("   6. Summon a test DAO with: npm run summon-dao");
+  console.log("   6. Create a test DAO with: npm run create-dao");
 
   return deployedContracts;
 }

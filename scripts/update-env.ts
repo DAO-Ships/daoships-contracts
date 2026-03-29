@@ -57,15 +57,14 @@ async function main() {
 
   // Update or add deployment addresses
   const updates: { [key: string]: string } = {
-    BAAL_SINGLETON: deploymentData.contracts.BaalSingleton || "",
+    DAOSHIP_SINGLETON: deploymentData.contracts.DAOShipSingleton || "",
     SHARES_SINGLETON: deploymentData.contracts.SharesERC20Singleton || "",
     LOOT_SINGLETON: deploymentData.contracts.LootERC20Singleton || "",
-    BAAL_SUMMONER: deploymentData.contracts.BaalSummoner || "",
-    BAAL_AND_VAULT_SUMMONER: deploymentData.contracts.BaalAndVaultSummoner || "",
+    DAOSHIP_LAUNCHER: deploymentData.contracts.DAOShipLauncher || "",
+    DAOSHIP_AND_VAULT_LAUNCHER: deploymentData.contracts.DAOShipAndVaultLauncher || "",
     POSTER: deploymentData.contracts.Poster || "",
-    ONBOARDER_SHAMAN: deploymentData.contracts.OnboarderShaman || "",
-    ETH_ONBOARDER_SHAMAN: deploymentData.contracts.EthOnboarderShaman || "",
-    CHECKIN_SHAMAN: deploymentData.contracts.CheckInShamanV2 || "",
+    ONBOARDER_NAVIGATOR: deploymentData.contracts.OnboarderNavigator || "",
+    ERC20_TRIBUTE_NAVIGATOR: deploymentData.contracts.ERC20TributeNavigator || "",
   };
 
   console.log("\n🔄 Updating addresses:");
