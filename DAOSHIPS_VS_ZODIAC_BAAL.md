@@ -1,13 +1,13 @@
 # DAO Ships vs zodiacBaal: Technical Comparison
 
-**DAO Ships version:** 2026-03-19 (post QuaiVault v2 integration)
-**Upstream ref:** HausDAO/Baal `feat/baalZodiac` (last commit 2024-06-11)
+**DAO Ships version:** 2026-03-30
+**Upstream ref:** HausDAO/Baal `feat/baalZodiac` (last commit 2024-06-11, confirmed latest as of 2026-03-30)
 
 ## Executive Summary
 
 DAO Ships is a DAO framework and launchpad for Quai Network, inspired by HausDAO Baal (MolochV3). It is not a fork with patches. Every contract has been rewritten from scratch against Solidity 0.8.22 and OpenZeppelin v5.0.0, the entire Gnosis Safe / Zodiac / OpenGSN dependency tree has been removed, and a substantial layer of governance safety hardening has been added that upstream does not have.
 
-The result is a smaller, more gas-efficient, and more auditable codebase. DAO Ships' DAOShip.sol compiles to 19,603 bytes (79.8% of the 24KB limit). The test suite includes 447 tests (unit + local E2E) and 22 on-chain E2E phases. Key security improvements include scoping `executeAsGovernance` to self-calls only, flash-loan-resistant sponsorship, deadlock prevention via `_effectiveSponsorThreshold` and `defaultExpiryWindow`, parallel proposal execution (removing upstream's sequential queue), and a DelegateCall whitelist on the vault.
+The result is a smaller, more gas-efficient, and more auditable codebase. DAO Ships' DAOShip.sol compiles to 21,729 bytes (88.4% of the 24KB limit). The test suite includes 506 tests (unit + local E2E) and 24 on-chain E2E phases. Key security improvements include scoping `executeAsGovernance` to self-calls only, flash-loan-resistant sponsorship, deadlock prevention via `_effectiveSponsorThreshold` and `defaultExpiryWindow`, parallel proposal execution (removing upstream's sequential queue), and a DelegateCall whitelist on the vault.
 
 The tradeoff is explicit: DAO Ships drops upstream's token upgradeability, EIP-712 signature voting/delegation, OpenGSN meta-transactions, and Gnosis Safe ecosystem compatibility. These are appropriate tradeoffs for Quai Network, where gas fees are low and the deployment target is Quai Vault rather than Gnosis Safe.
 
@@ -205,8 +205,9 @@ Upstream quirk: setting `votingPeriod = 0` or `gracePeriod = 0` in `setGovernanc
 | isGovernor | `permission == 4 \|\| 5 \|\| 6 \|\| 7` | `(navigators[account] & GOVERNOR) != 0` |
 | setNavigators lock check | Enumeration of disallowed values per lock | Bitwise AND per lock |
 | MAX_NAVIGATORS_PER_CALL | None | 20 |
+| Permission validation | None: any uint256 accepted | `MAX_PERMISSION = 7` — values > 7 rejected with `InvalidPermission()` |
 
-Bitwise checks are more gas-efficient and correctly handle any future permission bits without code changes.
+Bitwise checks are more gas-efficient. Permission validation prevents storing meaningless high bits that would confuse indexers and frontends.
 
 ---
 
@@ -311,6 +312,8 @@ Upstream's TributeMinion (176 lines) is a proposal-based tribute system with ERC
 - `withdrawStuckETH()` for governance recovery (OnboarderNavigator), `withdrawStuckTokens()` (ERC20TributeNavigator)
 - `ReentrancyGuard` on all entry points
 - Fee-on-transfer token detection (ERC20TributeNavigator: balance-before/after check)
+- ERC-2612 permit support (`onboardWithPermit()` on ERC20TributeNavigator — single-tx onboarding)
+- `navigatorType()` view function for indexer discovery
 - Custom errors throughout
 
 ---
