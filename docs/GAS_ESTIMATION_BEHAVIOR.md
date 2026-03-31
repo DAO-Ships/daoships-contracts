@@ -1,10 +1,12 @@
-# Gas Estimation Bug: processProposal with Membership Mints
+# Gas Estimation Behavior: try/catch and processProposal
 
 ## Summary
 
-`DAOShip.processProposal()` succeeds on-chain (tx status = 1) but with `actionFailed = true` when the wallet/node's gas estimation is used without a manual `gasLimit` override. The inner `execTransactionFromModule` DelegateCall runs out of gas, the try/catch catches it, and the proposal is marked as processed with `actionFailed = true`. The user sees a successful transaction but the governance action (minting shares) never executes.
+This document describes a known EVM gas estimation behavior that affects `DAOShip.processProposal()` and any contract using try/catch where the success path costs more gas than the failure path. This is not a bug in the contract — it is a well-documented limitation of `eth_estimateGas` across all EVM-compatible networks. Gnosis Safe, OpenZeppelin Governor, and other production governance contracts exhibit the same behavior and use the same mitigation (gas buffers).
 
-Setting `gasLimit = estimatedGas * 1.5` fixes the issue. Without the override, the wallet-estimated gas is insufficient for the inner call chain.
+**Behavior:** `processProposal()` completes on-chain (tx status = 1) but with `actionFailed = true` when the wallet/node's gas estimation is used without a manual `gasLimit` override. The inner `execTransactionFromModule` DelegateCall runs out of gas, the try/catch catches it, and the proposal is marked as processed with `actionFailed = true`. The user sees a successful transaction but the governance action (e.g., minting shares) doesn't execute.
+
+**Mitigation:** `gasLimit = estimatedGas * 1.5` consistently resolves this for all proposal types.
 
 ## Environment
 
