@@ -37,8 +37,9 @@ Tags follow hierarchical dot-notation: `daoships.<context>.<action>`
 | `daoships.member.profile` | Member (directly) | Minimal on-chain identity (name, avatar, bio) |
 | `daoships.proposal.vote.reason` | Voter (directly, after voting) | Why they voted the way they did |
 | `daoships.navigator.metadata` | Navigator deployer (directly) | Human-readable navigator description |
+| `daoships.navigator.allowlist` | Navigator deployer (directly) | Merkle tree for address-gated onboarding |
 
-**That's it.** Six tags. Everything else belongs off-chain.
+**That's it.** Seven tags. Everything else belongs off-chain.
 
 ### What Does NOT Belong in Poster
 
@@ -186,6 +187,35 @@ Posted by the navigator deployer. Provides a human-readable description that com
 
 Navigator configuration (multipliers, caps, prices) is readable on-chain. Don't duplicate it here — it goes stale. If you want to document navigator behavior, link to documentation from the DAO's website.
 
+### Navigator Allowlist (`daoships.navigator.allowlist`)
+
+Posted by the navigator deployer immediately after deploying a navigator with an address allowlist. Contains the full Merkle tree so the frontend can generate proofs for allowlisted users to onboard.
+
+```json
+{
+  "schemaVersion": "1.0",
+  "daoAddress": "0x00...*",
+  "navigatorAddress": "0x00...*",
+  "root": "0xabcdef...*",
+  "addresses": ["0x00abc...", "0x00def...", ...],
+  "treeDump": { ... }
+}
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `daoAddress` | Yes | The DAO's DAOShip contract address |
+| `navigatorAddress` | Yes | The navigator contract this allowlist belongs to |
+| `root` | Yes | Merkle root (bytes32 hex). Must match the navigator's on-chain `allowlistRoot()` |
+| `addresses` | Yes | Full list of allowlisted addresses (valid hex, non-empty) |
+| `treeDump` | Yes | Output of `StandardMerkleTree.dump()` from `@openzeppelin/merkle-tree`. Contains the full tree structure for client-side proof generation |
+
+**Trust verification:** Uses `MEMBER` trust level. The deployer posts this before the `setNavigators` governance proposal is processed, so the navigator address is not yet registered in the DAO — `SEMI_TRUSTED` cannot be used. The indexer validates hex format on all address fields and the root.
+
+**Size:** For a 100-address allowlist, the `treeDump` is approximately 8-10 KB. The 16 KB Poster limit supports allowlists of up to ~150 addresses per post.
+
+**Deduplication:** Key: `msg.sender` + `tag` + `daoAddress` + `navigatorAddress`. Last-write-wins. In practice, allowlists are set once (the navigator's `allowlistRoot` is immutable).
+
 ---
 
 ## The `details` Field Convention
@@ -278,7 +308,7 @@ await poster.post(
 |--------------|-------------|-------------------|
 | DAO vault address | **Verified** — governance-approved | `dao.profile`, `dao.announcement` |
 | Deployer wallet (matches launch event) | **Verified (initial)** — one-time at launch | `dao.profile.initial` |
-| Member wallet (shares > 0) | **Member** — verified shareholder | `member.profile`, `proposal.vote.reason` |
+| Member wallet (shares > 0) | **Member** — verified shareholder | `member.profile`, `proposal.vote.reason`, `navigator.allowlist` |
 | Navigator deployer | **Semi-trusted** — deployed the contract | `navigator.metadata` |
 | Any other address | **Untrusted** — do not index | — |
 

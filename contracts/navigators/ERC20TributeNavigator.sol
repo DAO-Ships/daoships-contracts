@@ -265,7 +265,7 @@ contract ERC20TributeNavigator is ReentrancyGuard {
 
         // Allowlist check
         if (allowlistRoot != bytes32(0)) {
-            if (!MerkleProof.verify(proof, allowlistRoot, keccak256(abi.encodePacked(msg.sender)))) {
+            if (!MerkleProof.verify(proof, allowlistRoot, keccak256(bytes.concat(keccak256(abi.encode(msg.sender)))))) {
                 revert NotAllowlisted();
             }
         }

@@ -887,12 +887,16 @@ describe("Navigator Contracts", function () {
   describe("OnboarderNavigator Merkle Allowlist", function () {
     /**
      * Build a Merkle tree for a 2-leaf allowlist.
+     * Uses OZ StandardMerkleTree compatible double-hash leaves:
+     *   leaf = keccak256(bytes.concat(keccak256(abi.encode(address))))
      * For a 2-leaf tree, the root is hash(sorted(leafA, leafB)).
      * Proof for leafA is [leafB] and vice versa.
      */
     function buildMerkleTree(addresses: string[]) {
       const leaves = addresses.map(addr =>
-        ethers.keccak256(ethers.solidityPacked(["address"], [addr]))
+        ethers.keccak256(ethers.concat([
+          ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(["address"], [addr]))
+        ]))
       );
 
       // Sort leaves for consistent root
