@@ -107,6 +107,53 @@ At execution time with this estimated gas, the EVM attempts the **success path**
 
 Adding 50% to the estimated gas (`gasLimit = estimate * 1.5`) consistently fixes the issue for membership mints. This suggests the actual gas needed is ~40-50% more than what `eth_estimateGas` returns.
 
+## Why the Contract Uses try/catch (Response to Quai Team)
+
+The try/catch around `execTransactionFromModule` is a deliberate and necessary design choice, not a workaround.
+
+### What happens WITHOUT try/catch
+
+If the inner governance action reverts (for any reason — OOG, bad calldata, vault misconfiguration, or a bug in the action itself), the ENTIRE `processProposal` transaction reverts. This means:
+
+1. **The proposal is never marked as processed.** It stays in `Ready` state permanently.
+2. **Anyone can keep retrying**, burning gas, with the same result.
+3. **If the action is permanently broken** (e.g., the vault removed DAOShip as a module between the vote and processing), the proposal becomes a zombie — passed but unprocessable, blocking governance attention indefinitely.
+4. **No on-chain record** of what happened. The proposal just sits in `Ready` forever with no indication of why it can't be processed.
+
+### What happens WITH try/catch (current design)
+
+A failing action results in `passed = true, actionFailed = true`. The proposal is consumed, governance moves on, and the failure is visible on-chain via the `ProcessProposal` event. The DAO can submit a new proposal to retry the action if desired.
+
+### Industry precedent
+
+This is the standard pattern in production governance contracts:
+
+- **Gnosis Safe:** `execTransaction()` returns `bool success` rather than reverting on inner call failure. Their SDK adds gas buffers for the same estimation reason.
+- **OpenZeppelin Governor:** `TimelockController` catches execution failures. Their documentation recommends explicit gas limits for execution.
+- **Upstream Baal (MolochV3):** Uses Zodiac `Module.exec()` which returns `bool` rather than reverting.
+
+### The gas estimation issue is an EVM-level limitation
+
+`eth_estimateGas` uses binary search to find the **minimum gas where the outermost call doesn't revert**. Since try/catch prevents the outer `processProposal` call from reverting regardless of the inner call's outcome, the binary search converges on the gas needed for the failure path (try fails → catch executes → function completes with `actionFailed = true`). The estimator never discovers that providing more gas would make the inner call succeed.
+
+This is not specific to DAO Ships. Any contract using try/catch where the success path costs more gas than the failure path exhibits this behavior. It is a known limitation across all EVM-compatible networks.
+
+### Potential node-level improvement
+
+A more sophisticated `eth_estimateGas` implementation could detect try/catch patterns and estimate for the success path rather than the minimum-to-not-revert path. Specifically, after finding the minimum gas, the estimator could check whether increasing gas changes the execution outcome (e.g., a return value or event emission changes). If so, it should return the higher gas estimate that achieves the "intended" outcome.
+
+This would be a valuable improvement to the gas estimation algorithm and would benefit all contracts that use try/catch, not just DAO Ships.
+
+### Recommended frontend mitigation
+
+Until gas estimation is improved at the node level, frontends should apply a gas buffer for `processProposal` calls:
+
+```typescript
+const estimated = await daoShip.processProposal.estimateGas(id, proposalData);
+const gasLimit = estimated * 150n / 100n; // 50% buffer
+await daoShip.processProposal(id, proposalData, { gasLimit });
+```
+
 ## Request
 
 The gas estimation should account for the **success path** of try/catch blocks, not just the failure path. When `processProposal` calls `execTransactionFromModule` inside a try/catch, the estimate should include the gas needed for the DelegateCall to succeed (the full inner call chain), not just the gas for catching the failure.

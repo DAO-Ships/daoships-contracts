@@ -476,7 +476,6 @@ event NewPost(
 | `daoships.dao.announcement` | Store as DAO announcement | `msg.sender` == vault address |
 | `daoships.member.profile` | Create/update member metadata | `msg.sender` has shares > 0 |
 | `daoships.proposal.vote.reason` | Associate with vote record (one per voter per proposal) | `msg.sender` matches voter in SubmitVote |
-| `daoships.treasury.label` | Store address labels | `msg.sender` == vault address |
 | `daoships.navigator.metadata` | Associate with navigator record | `msg.sender` deployed the navigator |
 
 **IMPORTANT:** Never index a post based on tag alone. Always verify `msg.sender` against the trust model before writing to the database. Discard posts where content exceeds 16 KB.

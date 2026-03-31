@@ -36,10 +36,9 @@ Tags follow hierarchical dot-notation: `daoships.<context>.<action>`
 | `daoships.dao.announcement` | DAO vault (via proposal) | Official DAO communications |
 | `daoships.member.profile` | Member (directly) | Minimal on-chain identity (name, avatar, bio) |
 | `daoships.proposal.vote.reason` | Voter (directly, after voting) | Why they voted the way they did |
-| `daoships.treasury.label` | DAO vault (via proposal) | Governance-approved address labels |
 | `daoships.navigator.metadata` | Navigator deployer (directly) | Human-readable navigator description |
 
-**That's it.** Seven tags. Everything else belongs off-chain.
+**That's it.** Six tags. Everything else belongs off-chain.
 
 ### What Does NOT Belong in Poster
 
@@ -47,6 +46,7 @@ Tags follow hierarchical dot-notation: `daoships.<context>.<action>`
 |------|---------|-------------|
 | Proposal rationale / discussion | Long-form content is expensive on-chain and doesn't benefit from wallet attribution — the proposer is already identified in `SubmitProposal` | Forum thread linked via `details` field |
 | Proposal milestones / deliverables | Project management — no governance-trust benefit | GitHub issues, Notion, forum |
+| Treasury address labels | Address book feature — no trust benefit over a frontend-maintained list | Frontend local storage, database |
 | Treasury transaction context | Accounting — better tracked in structured tools | Spreadsheet, treasury dashboard |
 | Delegation statements | Social commentary — delegate reputation is off-chain | Twitter, forum, blog |
 | DAO charter / bylaws | The document lives on IPFS; the governance approval is the proposal itself | Link in proposal `details`, pin on DAO website |
@@ -114,17 +114,27 @@ Posted by the DAO vault via governance proposal. Supersedes any `daoships.dao.pr
 
 ### DAO Announcement (`daoships.dao.announcement`)
 
+One active announcement per DAO at a time. Posting a new announcement replaces the previous one. To dismiss, post with `title: ""` or let `expiresAt` pass.
+
 ```json
 {
   "schemaVersion": "1.0",
   "daoAddress": "0x00...*",
-  "title": "Navigator upgrade complete*",
-  "body": "The OnboarderNavigator has been replaced with...",
-  "severity": "info"
+  "title": "Governance vote in progress*",
+  "body": "A proposal to upgrade the OnboarderNavigator is up for vote.",
+  "severity": "info",
+  "url": "https://forum.mydao.xyz/t/vote-on-navigator-upgrade/456",
+  "expiresAt": "2026-04-05T00:00:00Z"
 }
 ```
 
-`severity`: `info` | `warning` | `critical`
+| Field | Required | Notes |
+|-------|----------|-------|
+| `title` | Yes | Short notice. Empty string = dismiss current announcement. |
+| `body` | No | Brief context (keep under 500 chars — link to `url` for details) |
+| `severity` | No | `info` (default), `warning`, or `critical` |
+| `url` | No | Link to forum thread, discussion, or details page |
+| `expiresAt` | No | ISO 8601 timestamp. Indexer hides announcement after this time. Omit for no expiry. |
 
 ### Member Profile (`daoships.member.profile`)
 
@@ -159,19 +169,6 @@ Posted by a voter after casting their vote. The value: it proves the reasoning c
 ```
 
 **Important:** The `vote` field is informational and MUST NOT be used as the canonical vote direction. The indexer MUST use the on-chain `SubmitVote` event as the source of truth. The `vote` field here is self-reported and could mismatch.
-
-### Treasury Label (`daoships.treasury.label`)
-
-```json
-{
-  "schemaVersion": "1.0",
-  "daoAddress": "0x00...*",
-  "labels": [
-    { "address": "0xABC...", "label": "Dev multisig", "purpose": "Ongoing development" },
-    { "address": "0xDEF...", "label": "Marketing wallet", "purpose": "Community growth" }
-  ]
-}
-```
 
 ### Navigator Metadata (`daoships.navigator.metadata`)
 
@@ -279,7 +276,7 @@ await poster.post(
 
 | `msg.sender` | Trust Level | Tags They Can Post |
 |--------------|-------------|-------------------|
-| DAO vault address | **Verified** — governance-approved | `dao.profile`, `dao.announcement`, `treasury.label` |
+| DAO vault address | **Verified** — governance-approved | `dao.profile`, `dao.announcement` |
 | Deployer wallet (matches launch event) | **Verified (initial)** — one-time at launch | `dao.profile.initial` |
 | Member wallet (shares > 0) | **Member** — verified shareholder | `member.profile`, `proposal.vote.reason` |
 | Navigator deployer | **Semi-trusted** — deployed the contract | `navigator.metadata` |
@@ -391,6 +388,6 @@ Poster complements DAOShip's built-in events — it does not replace them.
 | DAO configuration | `SetupComplete`, `GovernanceConfigSet` events | On-chain governance parameters |
 | DAO branding and links | **Poster** (`daoships.dao.profile`) | Governance-approved social metadata |
 | Vote reasoning | **Poster** (`daoships.proposal.vote.reason`) | Wallet-attributed commentary |
-| Treasury address labels | **Poster** (`daoships.treasury.label`) | Governance-approved address book |
+| Treasury address labels | **Off-chain** (frontend address book) | No trust benefit from on-chain attribution |
 
 **Rule of thumb:** If it affects governance state, it's a DAOShip event. If it's wallet-attributed metadata that benefits from on-chain trust, use Poster. If it's just content, put it on a website.
