@@ -2,6 +2,7 @@
 pragma solidity ^0.8.22;
 
 import "../core/DAOShip.sol";
+import "../interfaces/INavigator.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
@@ -21,10 +22,13 @@ import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
  * - ReentrancyGuard on all external entry points
  * - Immutable configuration for gas efficiency
  */
-contract OnboarderNavigator is ReentrancyGuard {
+contract OnboarderNavigator is ReentrancyGuard, INavigator {
 
     /// @notice Navigator type identifier for indexer discovery
     string public constant navigatorType = "OnboarderNavigator";
+
+    /// @notice Address that deployed this navigator
+    address public immutable deployer;
 
     /// @notice Associated DAOShip DAO
     DAOShip public immutable daoShip;
@@ -96,6 +100,8 @@ contract OnboarderNavigator is ReentrancyGuard {
      * @param _mintCap Maximum total tokens mintable (0 for unlimited)
      * @param _perAddressCap Maximum tokens any single address can receive (0 for unlimited)
      * @param _allowlistRoot Merkle root for allowlist (bytes32(0) for open)
+     * @param _name Human-readable name (optional, can be empty. Recommended: up to 100 chars)
+     * @param _description Human-readable description (optional, can be empty. Recommended: up to 500 chars)
      */
     constructor(
         address _daoShip,
@@ -108,7 +114,9 @@ contract OnboarderNavigator is ReentrancyGuard {
         uint256 _expiry,
         uint256 _mintCap,
         uint256 _perAddressCap,
-        bytes32 _allowlistRoot
+        bytes32 _allowlistRoot,
+        string memory _name,
+        string memory _description
     ) {
         if (_daoShip == address(0)) revert InvalidConfig();
 
@@ -119,6 +127,7 @@ contract OnboarderNavigator is ReentrancyGuard {
         if (isMultiplierMode && isFixedPriceMode) revert InvalidConfig();
         if (isFixedPriceMode && _sharesPerUnit == 0 && _lootPerUnit == 0) revert InvalidConfig();
 
+        deployer = msg.sender;
         daoShip = DAOShip(payable(_daoShip));
         shareMultiplier = _shareMultiplier;
         lootMultiplier = _lootMultiplier;
@@ -130,6 +139,8 @@ contract OnboarderNavigator is ReentrancyGuard {
         mintCap = _mintCap;
         perAddressCap = _perAddressCap;
         allowlistRoot = _allowlistRoot;
+
+        emit NavigatorDeployed(_daoShip, msg.sender, navigatorType, _name, _description);
     }
 
     /**

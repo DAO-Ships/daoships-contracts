@@ -36,10 +36,9 @@ Tags follow hierarchical dot-notation: `daoships.<context>.<action>`
 | `daoships.dao.announcement` | DAO vault (via proposal) | Official DAO communications |
 | `daoships.member.profile` | Member (directly) | Minimal on-chain identity (name, avatar, bio) |
 | `daoships.proposal.vote.reason` | Voter (directly, after voting) | Why they voted the way they did |
-| `daoships.navigator.metadata` | Navigator deployer (directly) | Human-readable navigator description |
 | `daoships.navigator.allowlist` | Navigator deployer (directly) | Merkle tree for address-gated onboarding |
 
-**That's it.** Seven tags. Everything else belongs off-chain.
+**That's it.** Six tags. Everything else belongs off-chain.
 
 ### What Does NOT Belong in Poster
 
@@ -51,6 +50,7 @@ Tags follow hierarchical dot-notation: `daoships.<context>.<action>`
 | Treasury transaction context | Accounting — better tracked in structured tools | Spreadsheet, treasury dashboard |
 | Delegation statements | Social commentary — delegate reputation is off-chain | Twitter, forum, blog |
 | DAO charter / bylaws | The document lives on IPFS; the governance approval is the proposal itself | Link in proposal `details`, pin on DAO website |
+| Navigator metadata (name, description) | Now handled by `NavigatorDeployed` event in `INavigator` — emitted atomically at construction, unforgeable | `NavigatorDeployed` event |
 | Navigator upgrade context | Already captured by `NavigatorSet` events + proposal details | Proposal `details` field |
 | Cross-DAO endorsements | Political/social — not indexer data | DAO website, social media |
 | Signal voting / polls | Will be handled by a dedicated SignalNavigator | Future navigator contract |
@@ -170,22 +170,6 @@ Posted by a voter after casting their vote. The value: it proves the reasoning c
 ```
 
 **Important:** The `vote` field is informational and MUST NOT be used as the canonical vote direction. The indexer MUST use the on-chain `SubmitVote` event as the source of truth. The `vote` field here is self-reported and could mismatch.
-
-### Navigator Metadata (`daoships.navigator.metadata`)
-
-Posted by the navigator deployer. Provides a human-readable description that complements the on-chain `navigatorType()` view function and immutable constructor parameters.
-
-```json
-{
-  "schemaVersion": "1.0",
-  "daoAddress": "0x00...*",
-  "navigatorAddress": "0x00...*",
-  "name": "OnboarderNavigator",
-  "description": "Open onboarding: 2x share multiplier, 0.01 QUAI minimum"
-}
-```
-
-Navigator configuration (multipliers, caps, prices) is readable on-chain. Don't duplicate it here — it goes stale. If you want to document navigator behavior, link to documentation from the DAO's website.
 
 ### Navigator Allowlist (`daoships.navigator.allowlist`)
 
@@ -309,7 +293,6 @@ await poster.post(
 | DAO vault address | **Verified** — governance-approved | `dao.profile`, `dao.announcement` |
 | Deployer wallet (matches launch event) | **Verified (initial)** — one-time at launch | `dao.profile.initial` |
 | Member wallet (shares > 0) | **Member** — verified shareholder | `member.profile`, `proposal.vote.reason`, `navigator.allowlist` |
-| Navigator deployer | **Semi-trusted** — deployed the contract | `navigator.metadata` |
 | Any other address | **Untrusted** — do not index | — |
 
 **Rule: NEVER index a post based on tag alone.** Always verify `msg.sender` against the trust model before writing to the database. A post tagged `daoships.dao.profile` from a random wallet is spam, not a DAO profile.
@@ -367,7 +350,7 @@ All Poster content is user-supplied and MUST be treated as untrusted by frontend
 ### IPFS Considerations
 
 - IPFS content is only available while pinned. Frontends should display a placeholder when IPFS content is unavailable.
-- `sourceCode` and `auditReport` references in navigator metadata are self-reported and unverified. Frontends MUST NOT display them as "audited" — label them as "self-reported."
+- IPFS CIDs in any Poster content are self-reported. Frontends should label external references accordingly.
 - Use CIDv1 (base32) format for consistency: `ipfs://bafybeig...`
 
 ---

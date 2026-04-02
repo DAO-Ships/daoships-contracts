@@ -1279,7 +1279,8 @@ describe("OnboarderNavigator: fixed-price mode", function () {
       0,                  // minTribute (not used in fixed-price mode)
       0, 0,               // no expiry, no cap
       0,                  // perAddressCap (unlimited)
-      ethers.ZeroHash     // open
+      ethers.ZeroHash,    // open
+      "Test Onboarder", "Test navigator"
     );
 
     const config = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -1349,7 +1350,8 @@ describe("OnboarderNavigator: fixed-price mode", function () {
         0, 0,
         ethers.parseEther("1"), // pricePerUnit set → fixed price mode
         0, 0,                    // BUT sharesPerUnit=0 and lootPerUnit=0 → invalid
-        0, 0, 0, 0, ethers.ZeroHash
+        0, 0, 0, 0, ethers.ZeroHash,
+        "Test Onboarder", "Test navigator"
       )
     ).to.be.revertedWithCustomError(await ethers.getContractFactory("OnboarderNavigator"), "InvalidConfig");
   });
@@ -1400,7 +1402,8 @@ describe("ERC20TributeNavigator: fee-on-transfer (dust tribute) protection", fun
       await daoShip.getAddress(),
       await tributeToken.getAddress(),
       ethers.parseEther("1"), // 1 token per 1e18 wei shares
-      0, 0, 0, 0, ethers.ZeroHash
+      0, 0, 0, 0, ethers.ZeroHash,
+      "Test ERC20 Tribute", "Test navigator"
     );
 
     const config = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -1479,7 +1482,8 @@ describe("ERC20TributeNavigator: fee-on-transfer (dust tribute) protection", fun
       await daoShip.getAddress(),
       await tributeToken.getAddress(),
       1n, // pricePerShare = 1 wei (dust price — tribute rounds to 0 for small purchases)
-      0, 0, 0, 0, ethers.ZeroHash
+      0, 0, 0, 0, ethers.ZeroHash,
+      "Test ERC20 Tribute", "Test navigator"
     );
 
     const config = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -1923,7 +1927,8 @@ describe("High water mark retention", function () {
       0,      // expiry
       0,      // mintCap (unlimited)
       0,      // perAddressCap (unlimited)
-      ethers.ZeroHash // allowlistRoot (open)
+      ethers.ZeroHash, // allowlistRoot (open)
+      "Test Onboarder", "Test navigator"
     );
 
     const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(

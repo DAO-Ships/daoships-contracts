@@ -304,6 +304,7 @@ These are entirely different designs. Upstream's BaalAndVaultSummoner is primari
 
 Upstream's TributeMinion (176 lines) is a proposal-based tribute system with ERC20 escrow and DAO voting. DAO Ships' navigators are instant-onboarding with richer features:
 
+- `INavigator` interface — standard interface all navigators must implement, providing `deployer()` immutable, `navigatorType()` constant, and `NavigatorDeployed` event with trusted metadata (name, description) emitted at construction
 - Dual pricing modes (multiplier or fixed-price)
 - Merkle allowlists
 - Mint caps (global and per-address via `perAddressCap`)
@@ -313,7 +314,6 @@ Upstream's TributeMinion (176 lines) is a proposal-based tribute system with ERC
 - `ReentrancyGuard` on all entry points
 - Fee-on-transfer token detection (ERC20TributeNavigator: balance-before/after check)
 - ERC-2612 permit support (`onboardWithPermit()` on ERC20TributeNavigator — single-tx onboarding)
-- `navigatorType()` view function for indexer discovery
 - Custom errors throughout
 
 ---
@@ -414,6 +414,7 @@ Upstream's TributeMinion (176 lines) is a proposal-based tribute system with ERC
 | per-address mint caps (navigators) | No | Yes |
 | Merkle allowlists (navigators) | No | Yes |
 | Fee-on-transfer detection | No | Yes (ERC20TributeNavigator) |
+| Navigator standard interface (INavigator) | No | Yes (deployer identity, type, metadata event) |
 
 ---
 

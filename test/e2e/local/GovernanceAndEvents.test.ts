@@ -81,7 +81,8 @@ describe("Governance & Events E2E", function () {
         0,      // expiry
         0,      // mintCap
         0,      // perAddressCap (unlimited)
-        ethers.ZeroHash // allowlistRoot: open
+        ethers.ZeroHash, // allowlistRoot: open
+        "Test Onboarder", "Test navigator"
       );
 
       const innerCalldata = daoShip.interface.encodeFunctionData("setNavigators", [
@@ -212,7 +213,9 @@ describe("Governance & Events E2E", function () {
         0,      // expiry
         0,      // mintCap
         0,      // perAddressCap (unlimited)
-        ethers.ZeroHash // allowlistRoot: open
+        ethers.ZeroHash, // allowlistRoot: open
+        "Loot Onboarder", // name
+        "Test loot-only navigator" // description
       );
 
       // Add as navigator via governance

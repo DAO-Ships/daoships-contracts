@@ -26,10 +26,14 @@ Combined values: `3` = ADMIN+MANAGER, `6` = MANAGER+GOVERNOR, `7` = full access.
 
 ## Common Patterns
 
-All navigators MUST follow these patterns established by the shipped navigators:
+All navigators MUST implement `INavigator` (`contracts/interfaces/INavigator.sol`) and follow these patterns established by the shipped navigators:
 
-- **`string public constant navigatorType = "YourNavigatorName";`** — Required. The indexer calls this once at discovery time to identify the navigator type. Must be a compile-time constant (not a storage variable). This is how the indexer populates `ds_navigators.navigator_type` without needing an extra event or Poster call.
+- **`INavigator` interface** — Required. All navigators MUST implement this interface, which requires:
+  - `address public immutable deployer` — set to `msg.sender` in the constructor. The indexer uses this to verify Poster metadata authorship.
+  - `string public constant navigatorType = "YourNavigatorName";` — Compile-time constant. The indexer calls this once at discovery time to identify the navigator type.
+  - `NavigatorDeployed(address indexed daoShip, address indexed deployer, string navigatorType, string name, string description)` — Emitted exactly once in the constructor. This is the canonical source of navigator metadata. The `name` and `description` parameters are optional (can be empty strings) and are only emitted in the event, not stored on-chain.
 - `DAOShip public immutable daoShip` stored at construction
+- Constructor accepts optional `string memory _name` and `string memory _description` as the final parameters
 - `ReentrancyGuard` on all state-changing external functions
 - `mintCap` and `perAddressCap` if minting tokens
 - Immutable config variables where possible
@@ -47,7 +51,7 @@ All navigators MUST follow these patterns established by the shipped navigators:
 
 **What it does:** Instant onboarding via native token (QUAI) tribute. Members send QUAI, receive shares/loot atomically.
 
-**Key features:** Dual pricing (multiplier or fixed-price), Merkle allowlist, mintCap, perAddressCap, expiry, pause, refund handling, stuck native token recovery (`withdrawStuckETH`).
+**Key features:** Dual pricing (multiplier or fixed-price), Merkle allowlist, mintCap, perAddressCap, expiry, pause, refund handling, stuck native token recovery (`withdrawStuckETH`). Implements `INavigator` with `deployer` immutable and `NavigatorDeployed` event.
 
 **Why DAO Ships needs this:** `mintShares` requires MANAGER permission. Without a navigator, every new member would need a governance proposal to mint their shares -- impossible at scale.
 
@@ -57,7 +61,7 @@ All navigators MUST follow these patterns established by the shipped navigators:
 
 **What it does:** Instant onboarding via ERC20 token tribute. Accepts any configured ERC20, transfers to vault, mints shares/loot. Supports ERC-2612 permit for single-transaction onboarding (sign + onboard instead of approve + onboard).
 
-**Key features:** Per-token pricing, fee-on-transfer detection (balance before/after check), SafeERC20, ERC-2612 permit support via `onboardWithPermit()`, same cap/allowlist/expiry/pause as OnboarderNavigator.
+**Key features:** Per-token pricing, fee-on-transfer detection (balance before/after check), SafeERC20, ERC-2612 permit support via `onboardWithPermit()`, same cap/allowlist/expiry/pause as OnboarderNavigator. Implements `INavigator` with `deployer` immutable and `NavigatorDeployed` event.
 
 **ERC-2612 Permit support:** For tokens that implement ERC-2612 (USDC, most modern ERC20s), users can sign a gasless permit message and call `onboardWithPermit()` in a single transaction -- eliminating the separate `approve()` tx. The permit call is wrapped in try/catch per OpenZeppelin's recommended pattern, so it gracefully handles front-running, retries, and non-permit tokens. Frontend should detect permit support by probing `nonces()` on the tribute token.
 

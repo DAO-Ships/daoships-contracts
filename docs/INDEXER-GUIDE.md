@@ -397,7 +397,34 @@ event DelegateVotesChanged(address delegate, uint256 previousBalance, uint256 ne
 
 ### 4. Navigator Events
 
-Emitted by navigator contracts (OnboarderNavigator, ERC20TributeNavigator).
+Emitted by navigator contracts (OnboarderNavigator, ERC20TributeNavigator). All navigators implement `INavigator` and emit `NavigatorDeployed` at construction time.
+
+#### `NavigatorDeployed` (All navigators implementing INavigator)
+
+```solidity
+event NavigatorDeployed(
+    address indexed daoShip,
+    address indexed deployer,
+    string navigatorType,
+    string name,
+    string description
+);
+```
+
+**Topic0:** `keccak256("NavigatorDeployed(address,address,string,string,string)")`
+
+**Handler action:**
+- This is the **canonical source** of navigator metadata (name, description, deployer, type)
+- Store `deployer` in `ds_navigators.deployer` (add column if not present)
+- Store `name` and `description` in `ds_navigators.name` / `ds_navigators.description`
+- Store `navigatorType` in `ds_navigators.navigator_type`
+- `daoShip` identifies which DAO this navigator belongs to
+- `name` and `description` may be empty strings (they are optional at deploy time)
+- This event is emitted exactly once per navigator (in the constructor), so there is no deduplication concern
+
+**Discovery pattern:** The indexer should subscribe to `NavigatorDeployed` events from **all addresses** (unfiltered topic0 scan), not just from known navigator addresses. This allows the indexer to capture navigator metadata before the navigator is registered via `NavigatorSet`. When a `NavigatorSet` event arrives later, the metadata is already available.
+
+**Legacy navigators:** Navigators deployed before the `INavigator` interface will not emit this event. For those navigators, use the `navigatorType()` view function via RPC as a fallback. Name and description will not be available for legacy navigators.
 
 #### `Onboard` (OnboarderNavigator)
 
@@ -476,7 +503,7 @@ event NewPost(
 | `daoships.dao.announcement` | Store as DAO announcement | `msg.sender` == vault address |
 | `daoships.member.profile` | Create/update member metadata | `msg.sender` has shares > 0 |
 | `daoships.proposal.vote.reason` | Associate with vote record (one per voter per proposal) | `msg.sender` matches voter in SubmitVote |
-| `daoships.navigator.metadata` | Associate with navigator record | `msg.sender` deployed the navigator |
+| `daoships.navigator.allowlist` | Store Merkle tree for navigator allowlist proof generation | `msg.sender` has shares > 0 (MEMBER trust) |
 
 **IMPORTANT:** Never index a post based on tag alone. Always verify `msg.sender` against the trust model before writing to the database. Discard posts where content exceeds 16 KB.
 
@@ -605,12 +632,13 @@ CREATE TABLE ds_navigators (
     id VARCHAR(85) PRIMARY KEY,            -- {dao_address}-{navigator_address}
     dao_id VARCHAR(42) REFERENCES ds_daos(id),
     navigator_address VARCHAR(42) NOT NULL,
+    deployer VARCHAR(42),                  -- From INavigator.deployer() or NavigatorDeployed event (null for legacy navigators)
     permission INTEGER NOT NULL,           -- Bitmask: 1=ADMIN, 2=MANAGER, 4=GOVERNOR (valid: 0-7)
     is_active BOOLEAN DEFAULT TRUE,        -- FALSE when permission set to 0
-    navigator_type VARCHAR(50),            -- 'onboarder', 'erc20tribute', 'unknown'
+    navigator_type VARCHAR(50),            -- 'OnboarderNavigator', 'ERC20TributeNavigator', 'unknown'
     paused BOOLEAN DEFAULT FALSE,
 
-    -- Metadata (from Poster daoships.navigator.metadata)
+    -- Metadata (from NavigatorDeployed event; legacy navigators: navigatorType() RPC only)
     name VARCHAR(255),
     description TEXT,
     config JSONB,
@@ -764,6 +792,8 @@ const HANDLERS: Record<string, { name: string; handler: EventHandler }> = {
     { name: "DelegateVotesChanged", handler: handleDelegateVotesChanged },
 
   // Navigator events
+  [id("NavigatorDeployed(address,address,string,string,string)")]:
+    { name: "NavigatorDeployed", handler: handleNavigatorDeployed },
   [id("Onboard(address,address,uint256,uint256,uint256)")]:
     { name: "Onboard", handler: handleOnboard },
 
@@ -872,37 +902,53 @@ Self-sponsors (members with shares >= `sponsorThreshold`) are exempt and must se
 
 DAOs can launch with zero, one, or many navigators — there is no requirement to include navigators at launch. Navigators can be added or removed at any time via governance proposals.
 
-The indexer discovers navigators exclusively from `NavigatorSet` events. These are emitted:
-- During `setUp()` — one `NavigatorSet` event per initial navigator (if any)
-- During `setNavigators()` — when governance adds/updates/revokes navigators post-launch
+Navigator discovery uses two complementary event sources:
+
+1. **`NavigatorDeployed` events** (emitted by navigator contracts at deploy time) — provide metadata (name, description, deployer, type) before the navigator is even registered with a DAO. The indexer should subscribe to these globally (unfiltered topic0 scan).
+2. **`NavigatorSet` events** (emitted by DAOShip contracts) — provide the DAO association and permission bitmask. These are emitted during `setUp()` (initial navigators) and `setNavigators()` (post-launch changes).
+
+When `NavigatorDeployed` fires, the indexer should:
+1. Store the deployer, navigatorType, name, and description keyed by the emitting contract address
+2. If a `NavigatorSet` has already been processed for this address, update `ds_navigators` with the metadata
+3. If no `NavigatorSet` has been seen yet, hold the metadata until one arrives
 
 When `NavigatorSet` fires with `permission > 0`, the indexer should:
 1. Register the navigator address for event monitoring
 2. The DAO association is implicit — the emitting contract IS the DAOShip that owns this navigator
-3. Call `navigator.navigatorType()` to get the type string (one RPC call, cache forever)
+3. If a `NavigatorDeployed` event was already processed for this address, populate metadata from it
+4. Otherwise, call `navigator.navigatorType()` to get the type string (one RPC call, cache forever) and call `navigator.deployer()` to get the deployer address
 4. Start fetching `Onboard`/`Paused`/`Unpaused` events from the navigator address
 
 When `NavigatorSet` fires with `permission == 0`, the navigator is revoked. Mark it as inactive. Continue monitoring for historical data if desired, but no new onboarding events will be emitted (the navigator's functions check permissions on every call).
 
-### Navigator Type Discovery
+### Navigator Type and Metadata Discovery
 
-All DAO Ships navigators expose a `navigatorType` public constant:
+All DAO Ships navigators implement `INavigator` and expose both a `navigatorType` public constant and a `deployer` immutable:
 
 ```solidity
 string public constant navigatorType = "OnboarderNavigator";  // or "ERC20TributeNavigator", etc.
+address public immutable deployer;
 ```
 
-The indexer calls this once when a navigator is first discovered (on `NavigatorSet` with `permission > 0`) and caches the result. This is a `constant` — it's compiled into the bytecode and costs zero gas to read (pure STATICCALL).
+**Primary path (recommended):** The `NavigatorDeployed` event emitted at construction time contains `navigatorType`, `deployer`, `name`, and `description`. If the indexer has already captured this event, no RPC calls are needed.
+
+**Fallback path:** If the `NavigatorDeployed` event was missed (e.g., navigator deployed before the indexer started), the indexer calls `navigatorType()` and `deployer()` via RPC when the navigator is first discovered (on `NavigatorSet` with `permission > 0`) and caches the results. Both are immutable/constant and never change.
 
 ```typescript
-// In handleNavigatorSet, when permission > 0 and navigator not yet registered:
-const navigatorContract = new ethers.Contract(navigatorAddress, ["function navigatorType() view returns (string)"], provider);
+// In handleNavigatorSet, when permission > 0 and no NavigatorDeployed event cached:
+const navigatorContract = new ethers.Contract(navigatorAddress, [
+  "function navigatorType() view returns (string)",
+  "function deployer() view returns (address)"
+], provider);
 try {
-  const type = await navigatorContract.navigatorType();
-  // Store in ds_navigators.navigator_type
+  const [type, deployer] = await Promise.all([
+    navigatorContract.navigatorType(),
+    navigatorContract.deployer()
+  ]);
+  // Store in ds_navigators.navigator_type and ds_navigators.deployer
 } catch {
-  // Unknown navigator type (third-party or legacy contract)
-  // Store as "unknown"
+  // Unknown navigator type (third-party or legacy contract without INavigator)
+  // Store type as "unknown", deployer as null
 }
 ```
 
@@ -911,7 +957,7 @@ Known types:
 - `"ERC20TributeNavigator"` — ERC20 tribute onboarding
 - Future navigators will follow the same pattern
 
-**Why not an event?** The navigator type never changes — it's a compile-time constant. Putting it in an event would require either changing `setNavigators` to accept types (polluting every permission change/revocation) or adding tracking complexity to DAOShip. A single STATICCALL at discovery time is simpler and equally reliable.
+**`NavigatorDeployed` vs `navigatorType()` view function:** The `NavigatorDeployed` event provides richer data (name, description) in addition to the type and deployer. The `navigatorType()` view function remains useful as a fallback and for legacy navigators. Both sources are equally authoritative for the type string.
 
 **No on-chain lookup for DAO association.** The old indexer called `navigator.baal()` to associate navigators with DAOs. This is no longer necessary — the `NavigatorSet` event is emitted by the DAOShip contract, and the navigator `Onboard` event now includes `daoShipAddress` as an indexed field.
 

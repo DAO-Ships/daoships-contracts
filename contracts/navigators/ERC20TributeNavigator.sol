@@ -2,6 +2,7 @@
 pragma solidity ^0.8.22;
 
 import "../core/DAOShip.sol";
+import "../interfaces/INavigator.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -27,11 +28,14 @@ import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
  *
  * mintCap is also in raw wei (e.g., mintCap=100e18 caps at 100 whole shares+loot).
  */
-contract ERC20TributeNavigator is ReentrancyGuard {
+contract ERC20TributeNavigator is ReentrancyGuard, INavigator {
     using SafeERC20 for IERC20;
 
     /// @notice Navigator type identifier for indexer discovery
     string public constant navigatorType = "ERC20TributeNavigator";
+
+    /// @notice Address that deployed this navigator
+    address public immutable deployer;
 
     /// @notice Associated DAOShip DAO
     DAOShip public immutable daoShip;
@@ -95,6 +99,8 @@ contract ERC20TributeNavigator is ReentrancyGuard {
      * @param _mintCap Maximum total tokens mintable (0 for unlimited)
      * @param _perAddressCap Maximum tokens any single address can receive (0 for unlimited)
      * @param _allowlistRoot Merkle root for allowlist (bytes32(0) for open)
+     * @param _name Human-readable name (optional, can be empty. Recommended: up to 100 chars)
+     * @param _description Human-readable description (optional, can be empty. Recommended: up to 500 chars)
      */
     constructor(
         address _daoShip,
@@ -104,12 +110,15 @@ contract ERC20TributeNavigator is ReentrancyGuard {
         uint256 _expiry,
         uint256 _mintCap,
         uint256 _perAddressCap,
-        bytes32 _allowlistRoot
+        bytes32 _allowlistRoot,
+        string memory _name,
+        string memory _description
     ) {
         if (_daoShip == address(0)) revert InvalidConfig();
         if (_tributeToken == address(0)) revert InvalidConfig();
         if (_pricePerShare == 0 && _pricePerLoot == 0) revert InvalidConfig();
 
+        deployer = msg.sender;
         daoShip = DAOShip(payable(_daoShip));
         tributeToken = IERC20(_tributeToken);
         pricePerShare = _pricePerShare;
@@ -118,6 +127,8 @@ contract ERC20TributeNavigator is ReentrancyGuard {
         mintCap = _mintCap;
         perAddressCap = _perAddressCap;
         allowlistRoot = _allowlistRoot;
+
+        emit NavigatorDeployed(_daoShip, msg.sender, navigatorType, _name, _description);
     }
 
     /**

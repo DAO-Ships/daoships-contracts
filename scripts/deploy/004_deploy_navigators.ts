@@ -116,7 +116,10 @@ async function main() {
       minTribute: process.env.ONBOARDER_MIN_TRIBUTE || "0.01",
       expiry: process.env.ONBOARDER_EXPIRY || "0",
       mintCap: process.env.ONBOARDER_MINT_CAP || "0",
+      perAddressCap: process.env.ONBOARDER_PER_ADDRESS_CAP || "0",
       allowlistRoot: process.env.ONBOARDER_ALLOWLIST_ROOT || ZERO_BYTES32,
+      name: process.env.ONBOARDER_NAME || "OnboarderNavigator",
+      description: process.env.ONBOARDER_DESCRIPTION || "",
     },
     erc20Tribute: {
       tributeToken: process.env.TRIBUTE_TOKEN || "",
@@ -124,7 +127,10 @@ async function main() {
       pricePerLoot: process.env.TRIBUTE_PRICE_PER_LOOT || "0",
       expiry: process.env.TRIBUTE_EXPIRY || "0",
       mintCap: process.env.TRIBUTE_MINT_CAP || "0",
+      perAddressCap: process.env.TRIBUTE_PER_ADDRESS_CAP || "0",
       allowlistRoot: process.env.TRIBUTE_ALLOWLIST_ROOT || ZERO_BYTES32,
+      name: process.env.TRIBUTE_NAME || "ERC20TributeNavigator",
+      description: process.env.TRIBUTE_DESCRIPTION || "",
     },
   };
 
@@ -180,7 +186,9 @@ async function main() {
     navigatorConfig.onboarder.expiry,
     navigatorConfig.onboarder.mintCap,
     navigatorConfig.onboarder.perAddressCap || 0,
-    navigatorConfig.onboarder.allowlistRoot
+    navigatorConfig.onboarder.allowlistRoot,
+    navigatorConfig.onboarder.name || "OnboarderNavigator",
+    navigatorConfig.onboarder.description || ""
   );
   await onboarder.waitForDeployment();
   const onboarderAddress = await onboarder.getAddress();
@@ -210,7 +218,9 @@ async function main() {
       navigatorConfig.erc20Tribute.expiry,
       navigatorConfig.erc20Tribute.mintCap,
       navigatorConfig.erc20Tribute.perAddressCap || 0,
-      navigatorConfig.erc20Tribute.allowlistRoot
+      navigatorConfig.erc20Tribute.allowlistRoot,
+      navigatorConfig.erc20Tribute.name || "ERC20TributeNavigator",
+      navigatorConfig.erc20Tribute.description || ""
     );
     await erc20Tribute.waitForDeployment();
     const erc20TributeAddress = await erc20Tribute.getAddress();

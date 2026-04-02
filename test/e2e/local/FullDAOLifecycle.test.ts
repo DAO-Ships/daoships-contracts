@@ -61,7 +61,8 @@ describe("Full DAO Lifecycle E2E", function () {
       0,     // expiry: no expiry
       0,     // mintCap: unlimited
       0,     // perAddressCap: unlimited
-      ethers.ZeroHash // allowlistRoot: open
+      ethers.ZeroHash, // allowlistRoot: open
+      "Test Onboarder", "Test navigator"
     );
 
     // FAST GOVERNANCE for E2E testing
@@ -657,7 +658,8 @@ describe("Full DAO Lifecycle E2E", function () {
       0,                        // no expiry
       0,                        // no mintCap
       0,                        // perAddressCap (unlimited)
-      ethers.ZeroHash           // open allowlist
+      ethers.ZeroHash,          // open allowlist
+      "Test ERC20 Tribute", "Test navigator"
     );
 
     // Fast governance config

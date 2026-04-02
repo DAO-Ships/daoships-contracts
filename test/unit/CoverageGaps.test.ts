@@ -937,7 +937,8 @@ describe("CoverageGaps", function () {
         pastExpiry,
         0, // no cap
         0, // perAddressCap (unlimited)
-        ethers.ZeroHash // open
+        ethers.ZeroHash, // open
+        "Test ERC20 Tribute", "Test navigator"
       );
 
       // Register as MANAGER navigator
@@ -971,7 +972,8 @@ describe("CoverageGaps", function () {
         0, // no expiry
         ethers.parseEther("5"), // mintCap = 5e18
         0, // perAddressCap (unlimited)
-        ethers.ZeroHash
+        ethers.ZeroHash,
+        "Test ERC20 Tribute", "Test navigator"
       );
 
       // Register as MANAGER
@@ -1004,7 +1006,8 @@ describe("CoverageGaps", function () {
         0,
         0,
         0, // perAddressCap (unlimited)
-        ethers.ZeroHash
+        ethers.ZeroHash,
+        "Test ERC20 Tribute", "Test navigator"
       );
       const navigatorAddr = await navigator.getAddress();
 
@@ -1340,7 +1343,8 @@ describe("CoverageGaps", function () {
         0,      // expiry
         0,      // mintCap (unlimited)
         ethers.parseEther("5"), // perAddressCap = 5 shares
-        ethers.ZeroHash // allowlistRoot (open)
+        ethers.ZeroHash, // allowlistRoot (open)
+        "Test Onboarder", "Test navigator"
       );
 
       // Governance config
@@ -1446,7 +1450,8 @@ describe("CoverageGaps", function () {
         0,                         // expiry (none)
         0,                         // mintCap (unlimited)
         ethers.parseEther("10"),  // perAddressCap = 10 shares
-        ethers.ZeroHash            // allowlistRoot (open)
+        ethers.ZeroHash,           // allowlistRoot (open)
+        "Test ERC20 Tribute", "Test navigator"
       );
 
       // Governance config
@@ -1852,7 +1857,8 @@ describe("CoverageGaps", function () {
         0,      // expiry
         0,      // mintCap
         0,      // perAddressCap
-        ethers.ZeroHash // allowlistRoot (open)
+        ethers.ZeroHash, // allowlistRoot (open)
+        "Test Onboarder", "Test navigator"
       );
 
       // Set onboarder as MANAGER navigator (permission 2)
@@ -2920,7 +2926,8 @@ describe("CoverageGaps", function () {
         0,                      // expiry
         0,                      // mintCap
         0,                      // perAddressCap
-        ethers.ZeroHash         // allowlistRoot
+        ethers.ZeroHash,        // allowlistRoot
+        "Test ERC20 Tribute", "Test navigator"
       );
 
       // Accidentally send tokens to the navigator

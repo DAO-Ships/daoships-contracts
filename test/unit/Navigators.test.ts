@@ -106,7 +106,8 @@ describe("Navigator Contracts", function () {
         ethers.parseEther("1"),        // 1 share per unit
         0,                             // no loot
         0,                             // no minTribute
-        0, 0, 0, ethers.ZeroHash     // no expiry, no cap, no perAddressCap, open
+        0, 0, 0, ethers.ZeroHash,    // no expiry, no cap, no perAddressCap, open
+        "Test Onboarder", "Test navigator"
       );
 
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -179,7 +180,8 @@ describe("Navigator Contracts", function () {
         0,                             // no expiry
         ethers.parseEther("10"),       // mintCap = 10 shares
         0,                             // perAddressCap (unlimited)
-        ethers.ZeroHash
+        ethers.ZeroHash,
+        "Test Onboarder", "Test navigator"
       );
 
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -275,7 +277,8 @@ describe("Navigator Contracts", function () {
         await daoShip.getAddress(),
         10000, 0, 0, 0, 0,
         ethers.parseEther("0.01"),
-        expiryTime, 0, 0, ethers.ZeroHash
+        expiryTime, 0, 0, ethers.ZeroHash,
+        "Test Onboarder", "Test navigator"
       );
 
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -337,7 +340,8 @@ describe("Navigator Contracts", function () {
         0,                         // no expiry
         0,                         // no mint cap
         0,                         // perAddressCap (unlimited)
-        ethers.ZeroHash            // open allowlist
+        ethers.ZeroHash,           // open allowlist
+        "Test ERC20 Tribute", "Test navigator"
       );
 
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -431,7 +435,8 @@ describe("Navigator Contracts", function () {
       const ERC20TributeNavigator = await ethers.getContractFactory("ERC20TributeNavigator");
       const tributeNavigator = await ERC20TributeNavigator.deploy(
         await daoShip.getAddress(), await tributeToken.getAddress(),
-        ethers.parseEther("100"), 0, 0, ethers.parseEther("10"), 0, ethers.ZeroHash
+        ethers.parseEther("100"), 0, 0, ethers.parseEther("10"), 0, ethers.ZeroHash,
+        "Test ERC20 Tribute", "Test navigator"
       );
 
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -518,7 +523,8 @@ describe("Navigator Contracts", function () {
         await tributeToken.getAddress(),
         0,                         // pricePerShare=0 (shares not offered)
         ethers.parseEther("50"),   // pricePerLoot: 50 tokens per loot
-        0, 0, 0, ethers.ZeroHash
+        0, 0, 0, ethers.ZeroHash,
+        "Test ERC20 Tribute", "Test navigator"
       );
 
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -573,7 +579,8 @@ describe("Navigator Contracts", function () {
         await tributeToken.getAddress(),
         ethers.parseEther("100"), // pricePerShare
         ethers.parseEther("50"),  // pricePerLoot
-        0, 0, 0, ethers.ZeroHash
+        0, 0, 0, ethers.ZeroHash,
+        "Test ERC20 Tribute", "Test navigator"
       );
 
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -637,7 +644,8 @@ describe("Navigator Contracts", function () {
         expiryTime, // expiry set
         0,
         0,          // perAddressCap (unlimited)
-        ethers.ZeroHash
+        ethers.ZeroHash,
+        "Test ERC20 Tribute", "Test navigator"
       );
 
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -954,7 +962,8 @@ describe("Navigator Contracts", function () {
         0,      // expiry
         0,      // mintCap (unlimited)
         0,      // perAddressCap (unlimited)
-        root    // allowlistRoot
+        root,   // allowlistRoot
+        "Test Onboarder", "Test navigator"
       );
 
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -1044,10 +1053,136 @@ describe("Navigator Contracts", function () {
       const navigator = await ERC20TributeNavigator.deploy(
         await daoShip.getAddress(),
         await token.getAddress(),
-        ethers.parseEther("1"), 0, 0, 0, 0, ethers.ZeroHash
+        ethers.parseEther("1"), 0, 0, 0, 0, ethers.ZeroHash,
+        "Test ERC20 Tribute", "Test navigator"
       );
 
       expect(await navigator.navigatorType()).to.equal("ERC20TributeNavigator");
+    });
+  });
+
+  // ==========================================================================
+  // INavigator: deployer immutable + NavigatorDeployed event
+  // ==========================================================================
+  describe("INavigator: deployer and NavigatorDeployed", function () {
+    it("OnboarderNavigator should expose deployer as immutable", async function () {
+      const { onboarder, deployer } = await loadFixture(deployNavigatorFixture);
+      expect(await onboarder.deployer()).to.equal(deployer.address);
+    });
+
+    it("OnboarderNavigator should emit NavigatorDeployed on creation", async function () {
+      const [deployer] = await ethers.getSigners();
+      const daoShip = await deployDAOShipClone(deployer);
+
+      const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator");
+      const tx = await OnboarderNavigator.deploy(
+        await daoShip.getAddress(),
+        20000, 0, 0, 0, 0,
+        ethers.parseEther("0.01"),
+        0, 0, 0, ethers.ZeroHash,
+        "My Onboarder",
+        "Accepts QUAI and mints shares"
+      );
+      const receipt = await tx.deploymentTransaction()!.wait();
+
+      // Find NavigatorDeployed event in deployment receipt
+      const iface = OnboarderNavigator.interface;
+      const event = receipt!.logs.find((log: any) => {
+        try { return iface.parseLog(log)?.name === "NavigatorDeployed"; } catch { return false; }
+      });
+      expect(event).to.not.be.undefined;
+
+      const parsed = iface.parseLog(event!);
+      expect(parsed!.args.daoShip).to.equal(await daoShip.getAddress());
+      expect(parsed!.args.deployer).to.equal(deployer.address);
+      expect(parsed!.args.navigatorType).to.equal("OnboarderNavigator");
+      expect(parsed!.args.name).to.equal("My Onboarder");
+      expect(parsed!.args.description).to.equal("Accepts QUAI and mints shares");
+    });
+
+    it("ERC20TributeNavigator should expose deployer as immutable", async function () {
+      const [deployer] = await ethers.getSigners();
+      const daoShip = await deployDAOShipClone(deployer);
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const token = await MockERC20.deploy("Test", "TT");
+
+      const ERC20TributeNavigator = await ethers.getContractFactory("ERC20TributeNavigator");
+      const nav = await ERC20TributeNavigator.deploy(
+        await daoShip.getAddress(), await token.getAddress(),
+        ethers.parseEther("100"), 0, 0, 0, 0, ethers.ZeroHash,
+        "My Tribute Nav", "Accepts USDC"
+      );
+
+      expect(await nav.deployer()).to.equal(deployer.address);
+    });
+
+    it("ERC20TributeNavigator should emit NavigatorDeployed on creation", async function () {
+      const [deployer] = await ethers.getSigners();
+      const daoShip = await deployDAOShipClone(deployer);
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const token = await MockERC20.deploy("Test", "TT");
+
+      const ERC20TributeNavigator = await ethers.getContractFactory("ERC20TributeNavigator");
+      const tx = await ERC20TributeNavigator.deploy(
+        await daoShip.getAddress(), await token.getAddress(),
+        ethers.parseEther("100"), 0, 0, 0, 0, ethers.ZeroHash,
+        "USDC Tribute", "100 USDC per share"
+      );
+      const receipt = await tx.deploymentTransaction()!.wait();
+
+      const iface = ERC20TributeNavigator.interface;
+      const event = receipt!.logs.find((log: any) => {
+        try { return iface.parseLog(log)?.name === "NavigatorDeployed"; } catch { return false; }
+      });
+      expect(event).to.not.be.undefined;
+
+      const parsed = iface.parseLog(event!);
+      expect(parsed!.args.daoShip).to.equal(await daoShip.getAddress());
+      expect(parsed!.args.deployer).to.equal(deployer.address);
+      expect(parsed!.args.navigatorType).to.equal("ERC20TributeNavigator");
+      expect(parsed!.args.name).to.equal("USDC Tribute");
+      expect(parsed!.args.description).to.equal("100 USDC per share");
+    });
+
+    it("NavigatorDeployed emits correctly with empty name and description", async function () {
+      const [deployer] = await ethers.getSigners();
+      const daoShip = await deployDAOShipClone(deployer);
+
+      const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator");
+      const tx = await OnboarderNavigator.deploy(
+        await daoShip.getAddress(),
+        20000, 0, 0, 0, 0,
+        ethers.parseEther("0.01"),
+        0, 0, 0, ethers.ZeroHash,
+        "", "" // empty name and description — both optional
+      );
+      const receipt = await tx.deploymentTransaction()!.wait();
+
+      const iface = OnboarderNavigator.interface;
+      const event = receipt!.logs.find((log: any) => {
+        try { return iface.parseLog(log)?.name === "NavigatorDeployed"; } catch { return false; }
+      });
+      expect(event).to.not.be.undefined;
+
+      const parsed = iface.parseLog(event!);
+      expect(parsed!.args.name).to.equal("");
+      expect(parsed!.args.description).to.equal("");
+    });
+
+    it("deployer is different when deployed by a different account", async function () {
+      const [deployer, alice] = await ethers.getSigners();
+      const daoShip = await deployDAOShipClone(deployer);
+
+      const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator", alice);
+      const nav = await OnboarderNavigator.deploy(
+        await daoShip.getAddress(),
+        20000, 0, 0, 0, 0,
+        ethers.parseEther("0.01"),
+        0, 0, 0, ethers.ZeroHash,
+        "Alice's Navigator", "Deployed by alice"
+      );
+
+      expect(await nav.deployer()).to.equal(alice.address);
     });
   });
 
@@ -1117,7 +1252,8 @@ describe("Navigator Contracts", function () {
         ethers.parseEther("100"),  // pricePerShare
         0,                         // pricePerLoot
         0, 0, 0,                   // no expiry, no caps
-        ethers.ZeroHash            // open
+        ethers.ZeroHash,           // open
+        "Test ERC20 Tribute", "Test navigator"
       );
 
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -1276,7 +1412,8 @@ describe("Navigator Contracts", function () {
       const ERC20TributeNavigator = await ethers.getContractFactory("ERC20TributeNavigator");
       const nav = await ERC20TributeNavigator.deploy(
         await daoShip2.getAddress(), await plainToken.getAddress(),
-        ethers.parseEther("100"), 0, 0, 0, 0, ethers.ZeroHash
+        ethers.parseEther("100"), 0, 0, 0, 0, ethers.ZeroHash,
+        "Test ERC20 Tribute", "Test navigator"
       );
 
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(

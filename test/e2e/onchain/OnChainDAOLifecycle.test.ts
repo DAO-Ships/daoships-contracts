@@ -583,8 +583,9 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
       deployer,
       onboarderIpfsHash
     );
-    // OnboarderNavigator constructor (11 params): daoShip, shareMultiplier, lootMultiplier,
-    // pricePerUnit, sharesPerUnit, lootPerUnit, minTribute, expiry, mintCap, perAddressCap, allowlistRoot
+    // OnboarderNavigator constructor (13 params): daoShip, shareMultiplier, lootMultiplier,
+    // pricePerUnit, sharesPerUnit, lootPerUnit, minTribute, expiry, mintCap, perAddressCap,
+    // allowlistRoot, name, description
     // Using multiplier mode (pricePerUnit=0), unlimited cap, open allowlist.
     const onboarderNavigatorInstance = await OnboarderNavigatorFactory.deploy(
       predictedDAOShipAddress,
@@ -597,7 +598,9 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
       expiry,
       0,               // mintCap (0 = unlimited)
       0,               // perAddressCap (0 = unlimited)
-      quais.ZeroHash   // allowlistRoot (open)
+      quais.ZeroHash,  // allowlistRoot (open)
+      "QUAI Onboarder",       // name
+      "Onboard with QUAI tribute"  // description
     );
     await onboarderNavigatorInstance.waitForDeployment();
     const onboarderNavigatorAddress = await onboarderNavigatorInstance.getAddress();
@@ -649,7 +652,8 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
       deployer,
       erc20TributeIpfsHash
     );
-    // ERC20TributeNavigator constructor: daoShip, tributeToken, pricePerShare, pricePerLoot, expiry, mintCap, perAddressCap, allowlistRoot
+    // ERC20TributeNavigator constructor: daoShip, tributeToken, pricePerShare, pricePerLoot,
+    // expiry, mintCap, perAddressCap, allowlistRoot, name, description
     // 100 USDC per share (100e18 tokens per 1e18 shares), no loot, unlimited cap, open allowlist
     const pricePerShare = quais.parseQuai(process.env.TRIBUTE_PRICE_PER_SHARE || "100");
     const erc20TributeNavigatorInstance = await ERC20TributeNavigatorFactory.deploy(
@@ -660,7 +664,9 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
       0n,             // expiry (no expiry)
       0n,             // mintCap (unlimited)
       0n,             // perAddressCap (unlimited)
-      quais.ZeroHash  // allowlistRoot (open)
+      quais.ZeroHash, // allowlistRoot (open)
+      "USDC Tribute",              // name
+      "100 USDC per share"         // description
     );
     await erc20TributeNavigatorInstance.waitForDeployment();
     const erc20TributeNavigatorAddress = await erc20TributeNavigatorInstance.getAddress();

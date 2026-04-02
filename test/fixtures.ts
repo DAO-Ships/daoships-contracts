@@ -192,7 +192,9 @@ export async function deployNavigatorFixture(): Promise<NavigatorFixture> {
     0,      // expiry
     0,      // mintCap (unlimited)
     0,      // perAddressCap (unlimited)
-    ethers.ZeroHash // allowlistRoot (open)
+    ethers.ZeroHash, // allowlistRoot (open)
+    "Test Onboarder", // name
+    "Test navigator"  // description
   );
 
   const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
