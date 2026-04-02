@@ -77,6 +77,15 @@ contract DAOShip is ReentrancyGuard {
     /// @notice Maximum navigators that can be set in a single call (prevents gas limit DoS)
     uint256 public constant MAX_NAVIGATORS_PER_CALL = 20;
 
+    /// @notice Maximum number of registered guild tokens (ragequit withdrawal set).
+    /// @dev Guild tokens are the subset of vault holdings that members may withdraw via ragequit.
+    ///      A vault can hold an unlimited number of tokens for treasury/governance purposes;
+    ///      only tokens explicitly registered here are available in ragequit.
+    ///      Each token in a ragequit incurs a balanceOf + execTransactionFromModule call, so
+    ///      this cap protects against out-of-gas failures in a single ragequit transaction.
+    ///      20 tokens covers all realistic DAO treasury withdrawal scenarios.
+    uint256 public constant MAX_GUILD_TOKENS = 20;
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // STATE VARIABLES
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -482,6 +491,7 @@ contract DAOShip is ReentrancyGuard {
     error ManagerLocked();
     error GovernorLocked();
     error TooManyNavigators();
+    error TooManyGuildTokens();
     error InvalidPermission();
     error SponsorThresholdExceedsSupply();
     error CanOnlyTargetSelf();
@@ -595,9 +605,10 @@ contract DAOShip is ReentrancyGuard {
             }
         }
 
-        // Set initial guild tokens (deduplicated)
+        // Set initial guild tokens (deduplicated, capped at MAX_GUILD_TOKENS)
         for (uint256 i = 0; i < _guildTokens.length; i++) {
             if (!guildTokens[_guildTokens[i]]) {
+                if (_guildTokenList.length >= MAX_GUILD_TOKENS) revert TooManyGuildTokens();
                 guildTokens[_guildTokens[i]] = true;
                 _guildTokenList.push(_guildTokens[i]);
             }
@@ -1340,6 +1351,7 @@ contract DAOShip is ReentrancyGuard {
         for (uint256 i = 0; i < _tokens.length; i++) {
             if (_enabled[i] && !guildTokens[_tokens[i]]) {
                 // Adding a new guild token
+                if (_guildTokenList.length >= MAX_GUILD_TOKENS) revert TooManyGuildTokens();
                 guildTokens[_tokens[i]] = true;
                 _guildTokenList.push(_tokens[i]);
             } else if (!_enabled[i] && guildTokens[_tokens[i]]) {

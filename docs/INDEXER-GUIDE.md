@@ -293,6 +293,7 @@ event SetGuildTokens(address[] tokens, bool[] enabled);
 **Handler action:**
 - For each token: if `enabled[i] = true`, add to guild tokens; if `false`, remove
 - `address(0)` represents native QUAI
+- The contract enforces `MAX_GUILD_TOKENS = 20` — if a `setGuildTokens` call would exceed the cap, the proposal action fails (`actionFailed=true`). Guild tokens are only the subset of vault holdings available during ragequit; the vault can hold unlimited tokens
 
 #### `MintShares` / `MintLoot`
 

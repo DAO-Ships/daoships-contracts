@@ -3459,4 +3459,111 @@ describe("CoverageGaps", function () {
       ).to.be.revertedWithCustomError(daoShip, "TokenTransferFailed");
     });
   });
+
+  // ==========================================================================
+  // MAX_GUILD_TOKENS cap enforcement
+  // ==========================================================================
+  describe("MAX_GUILD_TOKENS cap", function () {
+    it("setUp reverts TooManyGuildTokens when initial tokens exceed MAX_GUILD_TOKENS", async function () {
+      const [deployer] = await ethers.getSigners();
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+
+      // Deploy 21 unique ERC20 tokens
+      const tokenAddresses: string[] = [];
+      for (let i = 0; i < 21; i++) {
+        const t = await MockERC20.deploy(`Token${i}`, `TK${i}`);
+        tokenAddresses.push(await t.getAddress());
+      }
+      // Sort ascending so addresses are unique (no dedup short-circuit)
+      tokenAddresses.sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1));
+
+      // Deploy fresh clone + supporting contracts
+      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
+      const shares = await SharesERC20.deploy();
+      const LootERC20 = await ethers.getContractFactory("LootERC20");
+      const loot = await LootERC20.deploy();
+      const DAOShipFactory = await ethers.getContractFactory("DAOShip");
+      const daoShipImpl = await DAOShipFactory.deploy();
+      const implAddr = (await daoShipImpl.getAddress()).slice(2).toLowerCase().padStart(40, "0");
+      const cloneBytecode = `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${implAddr}5af43d82803e903d91602b57fd5bf3`;
+      const cloneFactory = new ethers.ContractFactory([], cloneBytecode, deployer);
+      const cloneRaw = await cloneFactory.deploy();
+      const daoShip = await ethers.getContractAt("DAOShip", await cloneRaw.getAddress());
+      const MockAvatar = await ethers.getContractFactory("MockAvatar");
+      const avatar = await MockAvatar.deploy();
+      const MultisendCallOnly = await ethers.getContractFactory("MultiSendCallOnly");
+      const multisendCallOnly = await MultisendCallOnly.deploy();
+
+      await shares.transferOwnership(await daoShip.getAddress());
+      await loot.transferOwnership(await daoShip.getAddress());
+      await avatar.enableModule(await daoShip.getAddress());
+
+      const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint32", "uint32", "uint32", "uint256", "uint256", "uint256", "uint256"],
+        [3600, 3600, 3600, 0, 0, 0, 86400]
+      );
+      const initParams = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["address", "address", "address", "address", "bytes",
+         "address[]", "uint256[]", "address[]", "uint256[]", "uint256[]",
+         "address[]", "bool", "bool"],
+        [
+          await loot.getAddress(), await shares.getAddress(),
+          await avatar.getAddress(), await multisendCallOnly.getAddress(),
+          governanceConfig,
+          [], [],
+          [deployer.address], [ethers.parseEther("100")], [0n],
+          tokenAddresses, // 21 guild tokens — should revert
+          false, false
+        ]
+      );
+
+      await expect(daoShip.setUp(initParams)).to.be.revertedWithCustomError(daoShip, "TooManyGuildTokens");
+    });
+
+    it("setGuildTokens reverts TooManyGuildTokens when adding beyond MAX_GUILD_TOKENS", async function () {
+      const { daoShip, deployer } = await loadFixture(deployDAOShipFixture);
+      const daoShipAddr = await daoShip.getAddress();
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+
+      // Fill the registry to MAX_GUILD_TOKENS (20) via 4 proposals of 5 tokens each
+      const allTokens: string[] = [];
+      for (let i = 0; i < 20; i++) {
+        const t = await MockERC20.deploy(`T${i}`, `T${i}`);
+        allTokens.push(await t.getAddress());
+      }
+      // Register in batches of 5
+      for (let batch = 0; batch < 4; batch++) {
+        const slice = allTokens.slice(batch * 5, batch * 5 + 5);
+        const calldata = daoShip.interface.encodeFunctionData("setGuildTokens", [
+          slice,
+          Array(5).fill(true),
+        ]);
+        const proposalData = buildExecuteAsGovernanceProposal(daoShip, daoShipAddr, calldata);
+        await passProposal(daoShip, deployer, proposalData);
+      }
+
+      // Now attempt to add a 21st token — should revert via actionFailed
+      const extraToken = await MockERC20.deploy("Extra", "EXT");
+      const overflowCalldata = daoShip.interface.encodeFunctionData("setGuildTokens", [
+        [await extraToken.getAddress()],
+        [true],
+      ]);
+      const overflowProposalData = buildExecuteAsGovernanceProposal(daoShip, daoShipAddr, overflowCalldata);
+
+      // Submit, vote, advance time — then process manually to capture receipt
+      const submitTx = await daoShip.connect(deployer).submitProposal(overflowProposalData, 0, "overflow guild token");
+      await submitTx.wait();
+      const proposalId = await daoShip.proposalCount();
+      await daoShip.connect(deployer).submitVote(proposalId, true);
+      await time.increase(VOTING_PLUS_GRACE);
+      const processTx = await daoShip.processProposal(proposalId, overflowProposalData);
+      const receipt = await processTx.wait();
+
+      // The inner call reverts with TooManyGuildTokens; processProposal catches and emits actionFailed=true
+      const processedEvent = receipt?.logs
+        .map((log: any) => { try { return daoShip.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e?.name === "ProcessProposal");
+      expect(processedEvent?.args?.actionFailed).to.equal(true);
+    });
+  });
 });

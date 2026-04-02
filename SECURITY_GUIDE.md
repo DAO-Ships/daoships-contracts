@@ -258,6 +258,8 @@ For human-facing DAOs, the 24h voting period recommendation above renders this a
 
 Guild tokens are the set of assets that members receive their proportional share of when they ragequit. They are managed via `setGuildTokens(address[] tokens, bool[] includeTokens)`, which is a `governanceOnly` function — only callable by DAOShip itself, meaning it requires a passed governance proposal.
 
+The contract enforces `MAX_GUILD_TOKENS = 20`. Guild tokens are a subset of vault holdings — the vault itself can hold unlimited tokens for treasury and governance purposes. Only tokens explicitly registered as guild tokens are available during ragequit. Each guild token in a ragequit incurs a `balanceOf` call + `execTransactionFromModule` call, so the cap prevents out-of-gas failures in a single ragequit transaction. Attempting to exceed the cap (via `setUp` or `setGuildTokens`) reverts with `TooManyGuildTokens()`.
+
 `address(0)` represents the native QUAI balance of the vault. It is **not included by default** — the DAO must explicitly add it via governance if native token ragequit is desired.
 
 ### The known limitation: one broken token blocks the entire exit
@@ -340,7 +342,7 @@ Use this checklist before announcing a DAO as operational. All items are mandato
 - [ ] GOVERNOR navigator permissions reviewed if any automated agent is granted this role
 - [ ] Monitor `vault.isModuleEnabled(daoShipAddress)` — if DAOShip is ever removed as a module, governance is bricked
 - [ ] Never set `sponsorThreshold` to a value equal to current `totalSupply()` — a subsequent token burn can cause permanent governance deadlock
-- [ ] Any `setGuildTokens` governance proposal must include a source verification of the token contract (standard ERC20, non-rebasing, non-pausable transfer)
+- [ ] Any `setGuildTokens` governance proposal must include a source verification of the token contract (standard ERC20, non-rebasing, non-pausable transfer). The contract enforces `MAX_GUILD_TOKENS = 20` — exceeding the cap reverts with `TooManyGuildTokens()`
 - [ ] If ragequit begins failing for all members, check whether a recently added guild token is the cause — members can omit that token from their `tokens` array as a workaround while a removal proposal is submitted
 
 ### Why the DelegateCall whitelist must include MultiSendCallOnly

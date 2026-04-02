@@ -172,7 +172,7 @@ Cancelling during Submitted state prevents a proposal from being sponsored again
 
 | Aspect | Upstream | DAO Ships |
 |--------|----------|-----|
-| Token validation | None: accepts any token array | Requires tokens registered via `setGuildTokens()` |
+| Token validation | None: accepts any token array | Requires tokens registered via `setGuildTokens()`, capped at `MAX_GUILD_TOKENS = 20` |
 | Module check | None | `require(IAvatar(avatar).isModuleEnabled(address(this)))` |
 | ETH sentinel | `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` | `address(0)` |
 | Transfer execution | `_safeTransferETH`/`_safeTransfer` via Zodiac `execAndReturnData` | `IAvatar.execTransactionFromModule()` |
@@ -180,7 +180,7 @@ Cancelling during Submitted state prevents a proposal from being sponsored again
 | Retention check | Not in ragequit (only in processProposal) | Explicit retention check in ragequit |
 | Recipient validation | None | `require(to != address(0))` |
 
-Guild token registration prevents ragequitting with arbitrary tokens (which could drain the vault via malicious token contracts). The retention check in ragequit prevents members from collectively exiting below the minimum. The tradeoff: upstream needs no governance proposal to add ragequit tokens.
+Guild token registration prevents ragequitting with arbitrary tokens (which could drain the vault via malicious token contracts). `MAX_GUILD_TOKENS = 20` caps the registry to prevent out-of-gas ragequit transactions — each token costs a `balanceOf` + `execTransactionFromModule` call. The vault can hold unlimited tokens; guild tokens are only the ragequit-eligible subset. The retention check in ragequit prevents members from collectively exiting below the minimum. The tradeoff: upstream needs no governance proposal to add ragequit tokens.
 
 ### 2.12 Governance Config
 
@@ -205,6 +205,7 @@ Upstream quirk: setting `votingPeriod = 0` or `gracePeriod = 0` in `setGovernanc
 | isGovernor | `permission == 4 \|\| 5 \|\| 6 \|\| 7` | `(navigators[account] & GOVERNOR) != 0` |
 | setNavigators lock check | Enumeration of disallowed values per lock | Bitwise AND per lock |
 | MAX_NAVIGATORS_PER_CALL | None | 20 |
+| MAX_GUILD_TOKENS | None | 20 — caps ragequit token set to prevent OOG |
 | Permission validation | None: any uint256 accepted | `MAX_PERMISSION = 7` — values > 7 rejected with `InvalidPermission()` |
 
 Bitwise checks are more gas-efficient. Permission validation prevents storing meaningless high bits that would confuse indexers and frontends.
@@ -390,7 +391,7 @@ Upstream's TributeMinion (176 lines) is a proposal-based tribute system with ERC
 | Self-sponsoring | Yes | Yes (with flash-loan protection) |
 | Grace period ragequit | Yes | Yes |
 | Ragequit retention check | In processProposal only | In processProposal **and** ragequit |
-| Guild token registration | No (any token accepted) | Yes (governance-approved) |
+| Guild token registration | No (any token accepted) | Yes (governance-approved, `MAX_GUILD_TOKENS = 20`) |
 | Proposal auto-expiry | No | Yes (`defaultExpiryWindow`) |
 | Proposal cancellation (Submitted state) | No | Yes |
 | Submitter cancellation | No (sponsor cancels) | Yes |
