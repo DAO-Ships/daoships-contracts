@@ -34,6 +34,9 @@ abstract contract DAOShipVotes is ERC20 {
     /// @notice Total supply checkpoints for quorum calculations
     Checkpoint[] private _totalSupplyCheckpoints;
 
+    error TimepointOverflow();
+    error InvalidDelegatee();
+
     /**
      * @notice Emitted when an account changes their delegate
      * @param delegator The account delegating
@@ -84,6 +87,7 @@ abstract contract DAOShipVotes is ERC20 {
      * @return Voting power at the given timestamp
      */
     function getPriorVotes(address account, uint256 timepoint) public view returns (uint256) {
+        if (timepoint > type(uint40).max) revert TimepointOverflow();
         require(timepoint < block.timestamp, "DAOShipVotes: not yet determined");
         return _checkpointsLookup(_checkpoints[account], uint40(timepoint));
     }
@@ -104,15 +108,20 @@ abstract contract DAOShipVotes is ERC20 {
      * @return Total voting supply at the given timestamp
      */
     function getPastTotalSupply(uint256 timepoint) external view returns (uint256) {
+        if (timepoint > type(uint40).max) revert TimepointOverflow();
         require(timepoint < block.timestamp, "DAOShipVotes: not yet determined");
         return _checkpointsLookup(_totalSupplyCheckpoints, uint40(timepoint));
     }
 
     /**
      * @notice Delegate voting power to another address
-     * @param delegatee The address to delegate to (or address(0) to undelegate)
+     * @dev Delegating to address(0) is blocked — it would zero the account's checkpoint,
+     *      causing all subsequent transfers and burns to revert with arithmetic underflow.
+     *      To "undelegate", delegate to self: delegate(msg.sender).
+     * @param delegatee The address to delegate to (use msg.sender to self-delegate)
      */
     function delegate(address delegatee) public virtual {
+        if (delegatee == address(0)) revert InvalidDelegatee();
         _delegate(msg.sender, delegatee);
     }
 

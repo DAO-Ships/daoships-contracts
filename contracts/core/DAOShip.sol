@@ -4,6 +4,7 @@ pragma solidity ^0.8.22;
 import "../interfaces/IAvatar.sol";
 import "../interfaces/IDAOShipToken.sol";
 import "../libraries/Enum.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
@@ -36,9 +37,9 @@ contract DAOShip is ReentrancyGuard {
      * @notice Navigator permission system uses bit flags for combining permissions
      *
      * Permissions:
-     * - ADMIN (1):    Can pause/unpause tokens, set governance config
+     * - ADMIN (1):    Can pause/unpause tokens (setAdminConfig)
      * - MANAGER (2):  Can mint/burn shares and loot
-     * - GOVERNOR (4): Can cancel proposals, set governance config
+     * - GOVERNOR (4): Can cancel proposals, set governance config (setGovernanceConfig)
      *
      * Combining permissions (bitwise OR):
      * - ADMIN + MANAGER = 3
@@ -184,26 +185,36 @@ contract DAOShip is ReentrancyGuard {
      * @param yesBalance Share-weighted yes votes (used for quorum)
      * @param noBalance Share-weighted no votes
      * @param details IPFS hash or metadata string
-     * @param status Boolean flags: [cancelled, processed, passed, actionFailed]
+     * @param statusFlags Packed status bits: CANCELLED(1) | PROCESSED(2) | PASSED(4) | ACTION_FAILED(8)
      */
     struct Proposal {
+        // Slot 1: id (4) + sponsor (20) + yesVotes (4) + noVotes (4) = 32 bytes
         uint32 id;
-        bytes32 proposalDataHash;
         address sponsor;
+        uint32 yesVotes;
+        uint32 noVotes;
+        // Slot 2: submitter (20) + votingStarts (5) + votingEnds (5) = 30 bytes + 2 pad
         address submitter;
         uint40 votingStarts;
         uint40 votingEnds;
+        // Slot 3: graceEnds (5) + expiration (5) + statusFlags (1) = 11 bytes + 21 pad
         uint40 graceEnds;
         uint40 expiration;
-        uint32 yesVotes;
-        uint32 noVotes;
+        uint8 statusFlags;
+        // Full slots
+        bytes32 proposalDataHash;
         uint256 yesBalance;
         uint256 noBalance;
-        uint256 maxTotalSharesAtSponsor; // Total shares snapshot at sponsorship (for quorum)
-        uint256 maxTotalSharesAndLootAtVote; // High water mark of total supply during voting (for retention)
+        uint256 maxTotalSharesAtSponsor;
+        uint256 maxTotalSharesAndLootAtVote;
         string details;
-        bool[4] status; // [cancelled, processed, passed, actionFailed]
     }
+
+    // Status flag bit positions
+    uint8 internal constant STATUS_CANCELLED = 1;
+    uint8 internal constant STATUS_PROCESSED = 2;
+    uint8 internal constant STATUS_PASSED = 4;
+    uint8 internal constant STATUS_ACTION_FAILED = 8;
 
     /**
      * @notice Proposal state enum (computed from timestamps and flags)
@@ -480,6 +491,7 @@ contract DAOShip is ReentrancyGuard {
     error InvalidRecipient();
     error NothingToBurn();
     error InsufficientRetention();
+    error InsufficientProcessGas();
     error BalanceQueryFailed();
     error ETHTransferFailed();
     error TokenTransferFailed();
@@ -595,8 +607,9 @@ contract DAOShip is ReentrancyGuard {
         minRetentionPercent = _minRetentionPercent;
         defaultExpiryWindow = _defaultExpiryWindow;
 
-        // Set initial navigators
+        // Set initial navigators (same cap as setNavigators for consistency)
         if (_navigators.length != _navigatorPermissions.length) revert LengthMismatch();
+        if (_navigators.length > MAX_NAVIGATORS_PER_CALL) revert TooManyNavigators();
         for (uint256 i = 0; i < _navigators.length; i++) {
             if (_navigators[i] != address(0)) {
                 if (_navigatorPermissions[i] > MAX_PERMISSION) revert InvalidPermission();
@@ -605,7 +618,8 @@ contract DAOShip is ReentrancyGuard {
             }
         }
 
-        // Set initial guild tokens (deduplicated, capped at MAX_GUILD_TOKENS)
+        // Set initial guild tokens (deduplicated, capped at MAX_GUILD_TOKENS).
+        // address(0) is a valid guild token — it represents native QUAI in ragequit.
         for (uint256 i = 0; i < _guildTokens.length; i++) {
             if (!guildTokens[_guildTokens[i]]) {
                 if (_guildTokenList.length >= MAX_GUILD_TOKENS) revert TooManyGuildTokens();
@@ -617,18 +631,27 @@ contract DAOShip is ReentrancyGuard {
         // Mint initial shares and loot
         if (_initMembers.length != _initShareAmounts.length || _initMembers.length != _initLootAmounts.length) revert LengthMismatch();
 
+        uint256 _totalShares;
+        uint256 _totalLoot;
         for (uint256 i = 0; i < _initMembers.length; i++) {
             if (_initMembers[i] != address(0)) {
                 if (_initShareAmounts[i] > 0) {
                     sharesToken.mint(_initMembers[i], _initShareAmounts[i]);
-                    totalShares += _initShareAmounts[i];
+                    _totalShares += _initShareAmounts[i];
                 }
                 if (_initLootAmounts[i] > 0) {
                     lootToken.mint(_initMembers[i], _initLootAmounts[i]);
-                    totalLoot += _initLootAmounts[i];
+                    _totalLoot += _initLootAmounts[i];
                 }
             }
         }
+        totalShares = _totalShares;
+        totalLoot = _totalLoot;
+
+        // Note: sponsorThreshold is NOT validated against initial supply here (unlike
+        // setGovernanceConfig). A DAO may intentionally start with a threshold higher
+        // than initial supply, expecting to onboard members later. The runtime capping
+        // in _effectiveSponsorThreshold() handles this: min(sponsorThreshold, totalSupply).
 
         // Pause tokens if requested (after minting so founding members receive tokens)
         if (_pauseSharesOnLaunch) sharesToken.pause();
@@ -719,16 +742,18 @@ contract DAOShip is ReentrancyGuard {
         if (prop.id == 0) return ProposalState.Unborn;
 
         // Proposal was cancelled
-        if (prop.status[0]) return ProposalState.Cancelled;
+        if ((prop.statusFlags & STATUS_CANCELLED) != 0) return ProposalState.Cancelled;
 
         // Proposal was processed (status[1]=true means processProposal was called)
-        if (prop.status[1]) {
-            // Check if it passed or was defeated
-            return prop.status[2] ? ProposalState.Processed : ProposalState.Defeated;
+        if ((prop.statusFlags & STATUS_PROCESSED) != 0) {
+            return ((prop.statusFlags & STATUS_PASSED) != 0) ? ProposalState.Processed : ProposalState.Defeated;
         }
 
-        // Not sponsored yet
-        if (prop.sponsor == address(0)) return ProposalState.Submitted;
+        // Not sponsored yet — check explicit expiration before returning Submitted
+        if (prop.sponsor == address(0)) {
+            if (prop.expiration != 0 && block.timestamp > prop.expiration) return ProposalState.Expired;
+            return ProposalState.Submitted;
+        }
 
         // Check expiration (explicit)
         if (prop.expiration != 0 && block.timestamp > prop.expiration) {
@@ -763,7 +788,11 @@ contract DAOShip is ReentrancyGuard {
      * @return status Boolean array [cancelled, processed, passed, actionFailed]
      */
     function getProposalStatus(uint32 id) external view returns (bool[4] memory status) {
-        return proposals[id].status;
+        uint8 flags = proposals[id].statusFlags;
+        status[0] = (flags & STATUS_CANCELLED) != 0;
+        status[1] = (flags & STATUS_PROCESSED) != 0;
+        status[2] = (flags & STATUS_PASSED) != 0;
+        status[3] = (flags & STATUS_ACTION_FAILED) != 0;
     }
 
     /**
@@ -938,7 +967,9 @@ contract DAOShip is ReentrancyGuard {
     function _sponsorProposal(uint32 id, address sponsor) internal {
         Proposal storage prop = proposals[id];
 
-        if (prop.id == 0) revert InvalidProposal();
+        // state(id) returns Unborn for non-existent proposals (id==0) and handles
+        // all state checks including cancelled/processed. AlreadySponsored is checked
+        // separately since state() returns Submitted for unsponsored proposals.
         if (prop.sponsor != address(0)) revert AlreadySponsored();
         if (state(id) != ProposalState.Submitted) revert NotSubmitted();
 
@@ -992,7 +1023,7 @@ contract DAOShip is ReentrancyGuard {
 
         // Inline voting-state check — avoids full state() computation which includes
         // _didProposalPass and auto-expiry logic irrelevant during active voting.
-        if (prop.votingStarts == 0 || prop.status[0] || prop.status[1]) revert NotVoting();
+        if (prop.votingStarts == 0 || (prop.statusFlags & (STATUS_CANCELLED | STATUS_PROCESSED)) != 0) revert NotVoting();
         if (block.timestamp < prop.votingStarts || block.timestamp >= prop.votingEnds) revert NotVoting();
         if (memberVoted[msg.sender][id]) revert AlreadyVoted();
 
@@ -1039,20 +1070,18 @@ contract DAOShip is ReentrancyGuard {
         // Accept both Ready and Defeated states (Defeated proposals can be formally closed)
         ProposalState currentState = state(id);
         if (currentState != ProposalState.Ready && currentState != ProposalState.Defeated) revert NotReady();
-        if (prop.status[1]) revert AlreadyProcessed();
-        // Defeated proposals can be closed with empty data since they will never execute.
-        // This allows formally closing defeated proposals without requiring the original data.
-        if (currentState != ProposalState.Defeated) {
+        if ((prop.statusFlags & STATUS_PROCESSED) != 0) revert AlreadyProcessed();
+        // Defeated proposals must be closed with empty data (they never execute).
+        // Ready proposals must match the original hash. Requiring empty data for defeated
+        // proposals prevents off-chain log pollution with fabricated calldata.
+        if (currentState == ProposalState.Defeated) {
+            if (proposalData.length > 0) revert HashMismatch();
+        } else {
             if (keccak256(abi.encode(proposalData)) != prop.proposalDataHash) revert HashMismatch();
         }
 
-        // Check expiration
-        if (prop.expiration != 0) {
-            if (block.timestamp > prop.expiration) revert Expired();
-        }
-
         // Mark as processed
-        prop.status[1] = true;
+        prop.statusFlags |= STATUS_PROCESSED;
 
         // If state() returned Ready, _didProposalPass already confirmed the proposal passed
         // (state() calls _didProposalPass at line 708 and returns Defeated if it fails).
@@ -1071,7 +1100,7 @@ contract DAOShip is ReentrancyGuard {
             }
         }
 
-        prop.status[2] = passed;
+        if (passed) prop.statusFlags |= STATUS_PASSED;
 
         bool actionFailed = false;
 
@@ -1090,6 +1119,14 @@ contract DAOShip is ReentrancyGuard {
             ) returns (bool result) {
                 success = result;
             } catch {
+                // M-1 fix: Distinguish OOG grief from legitimate revert.
+                // A legitimate revert (wrong calldata, failed transfer, etc.) leaves
+                // plenty of gas remaining. An OOG — whether from a gas-starved griefing
+                // call or genuinely insufficient gas — leaves very little. If gasleft
+                // is below the threshold, revert the entire processProposal tx instead
+                // of marking actionFailed. This keeps the proposal in Ready state so
+                // it can be re-processed with adequate gas.
+                if (gasleft() < 50_000) revert InsufficientProcessGas();
                 success = false;
             }
 
@@ -1097,7 +1134,15 @@ contract DAOShip is ReentrancyGuard {
             _inProposalExecution = false;
 
             actionFailed = !success;
-            prop.status[3] = actionFailed;
+            if (actionFailed) prop.statusFlags |= STATUS_ACTION_FAILED;
+
+            // M-7: Verify DAOShip is still a module on the vault after execution.
+            // A proposal batch that removes DAOShip as a module permanently bricks
+            // governance (no future proposals, no ragequit). Since avatar is immutable
+            // after setUp, there is no recovery path. This check causes the entire
+            // processProposal to revert, keeping the proposal in Ready state so the
+            // DAO remains operational. The offending proposal must be allowed to expire.
+            if (!IAvatar(avatar).isModuleEnabled(address(this))) revert NotEnabledModule();
         }
 
         emit ProcessProposal(id, passed, actionFailed, msg.sender);
@@ -1111,8 +1156,8 @@ contract DAOShip is ReentrancyGuard {
         Proposal storage prop = proposals[id];
 
         if (prop.id == 0) revert InvalidProposal();
-        if (prop.status[0]) revert AlreadyCancelled();
-        if (prop.status[1]) revert AlreadyProcessed();
+        if ((prop.statusFlags & STATUS_CANCELLED) != 0) revert AlreadyCancelled();
+        if ((prop.statusFlags & STATUS_PROCESSED) != 0) revert AlreadyProcessed();
 
         // Only Submitted or Voting proposals can be cancelled
         ProposalState currentState = state(id);
@@ -1129,7 +1174,7 @@ contract DAOShip is ReentrancyGuard {
             (navigators[msg.sender] & GOVERNOR) == 0 &&
             !sponsorFellBelow) revert NotAuthorized();
 
-        prop.status[0] = true;
+        prop.statusFlags |= STATUS_CANCELLED;
 
         emit CancelProposal(id, msg.sender);
     }
@@ -1169,10 +1214,12 @@ contract DAOShip is ReentrancyGuard {
         if (to.length != amount.length) revert LengthMismatch();
         if (to.length == 0) revert EmptyArrays();
 
+        uint256 total;
         for (uint256 i = 0; i < to.length; i++) {
             sharesToken.mint(to[i], amount[i]);
-            totalShares += amount[i];
+            total += amount[i];
         }
+        totalShares += total;
 
         emit MintShares(to, amount);
     }
@@ -1186,10 +1233,12 @@ contract DAOShip is ReentrancyGuard {
         if (to.length != amount.length) revert LengthMismatch();
         if (to.length == 0) revert EmptyArrays();
 
+        uint256 total;
         for (uint256 i = 0; i < to.length; i++) {
             lootToken.mint(to[i], amount[i]);
-            totalLoot += amount[i];
+            total += amount[i];
         }
+        totalLoot += total;
 
         emit MintLoot(to, amount);
     }
@@ -1213,8 +1262,8 @@ contract DAOShip is ReentrancyGuard {
 
         for (uint256 i = 0; i < from.length; i++) {
             sharesToken.burn(from[i], amount[i]);
-            totalShares -= amount[i];
         }
+        totalShares -= totalToBurn;
 
         emit BurnShares(from, amount);
     }
@@ -1228,10 +1277,12 @@ contract DAOShip is ReentrancyGuard {
         if (from.length != amount.length) revert LengthMismatch();
         if (from.length == 0) revert EmptyArrays();
 
+        uint256 totalToBurn;
         for (uint256 i = 0; i < from.length; i++) {
             lootToken.burn(from[i], amount[i]);
-            totalLoot -= amount[i];
+            totalToBurn += amount[i];
         }
+        totalLoot -= totalToBurn;
 
         emit BurnLoot(from, amount);
     }
@@ -1419,6 +1470,13 @@ contract DAOShip is ReentrancyGuard {
      *      mintShares, mintLoot, burnShares, burnLoot, setAdminConfig, setGovernanceConfig,
      *      convertSharesToLoot.
      *
+     *      Note: mintShares, mintLoot, burnShares, burnLoot, and convertSharesToLoot
+     *      intentionally do NOT have nonReentrant — they must be callable from governance
+     *      proposals via this self-call path. During ragequit, a callback could theoretically
+     *      trigger minting via a MANAGER navigator, but the ragequit balance snapshot
+     *      prevents any manipulation of withdrawal amounts, and the caller pays full
+     *      tribute price for any new minting. See SECURITY_GUIDE.md §7 for details.
+     *
      * @param _to Must be address(this) — only DAOShip's own functions can be called
      * @param _value Must be 0 — DAOShip has no receive() and cannot hold ETH
      * @param _data Encoded function call to execute on DAOShip
@@ -1514,15 +1572,16 @@ contract DAOShip is ReentrancyGuard {
         address avatarCache = avatar;
         uint256[] memory fairShares = new uint256[](tokens.length);
 
+        // H-1 fix: Snapshot all guild token balances BEFORE any transfers.
+        // This prevents a reentrant callback during transfer (e.g., a receive() that
+        // triggers navigator onboarding) from inflating vault balances for tokens
+        // processed later in the loop.
         for (uint256 i = 0; i < tokens.length; i++) {
             uint256 balance;
 
-            // Handle ETH (address(0)) vs ERC20 tokens
             if (tokens[i] == address(0)) {
-                // ETH balance
                 balance = avatarCache.balance;
             } else {
-                // ERC20 token balance
                 (bool success, bytes memory data) = tokens[i].staticcall(
                     abi.encodeWithSelector(IERC20.balanceOf.selector, avatarCache)
                 );
@@ -1530,12 +1589,14 @@ contract DAOShip is ReentrancyGuard {
                 balance = abi.decode(data, (uint256));
             }
 
-            // Calculate fair share
             fairShares[i] = (balance * totalToBurn) / currentTotalSupply;
+        }
 
+        // Transfer phase: execute withdrawals using the pre-computed fair shares.
+        // Callbacks during transfers cannot affect fair share amounts.
+        for (uint256 i = 0; i < tokens.length; i++) {
             if (fairShares[i] > 0) {
                 if (tokens[i] == address(0)) {
-                    // Transfer ETH via IAvatar
                     bool execSuccess = IAvatar(avatarCache).execTransactionFromModule(
                         to,
                         fairShares[i],
@@ -1544,7 +1605,6 @@ contract DAOShip is ReentrancyGuard {
                     );
                     if (!execSuccess) revert ETHTransferFailed();
                 } else {
-                    // Transfer ERC20 via IAvatar
                     bool execSuccess = IAvatar(avatarCache).execTransactionFromModule(
                         tokens[i],
                         0,

@@ -161,6 +161,8 @@ event SubmitProposal(
 
 **Note:** `submitter` is now an indexed field. The old indexer extracted this from `tx.from` which was fragile.
 
+**Note on `proposalDataHash`:** The hash is `keccak256(abi.encode(proposalData))`, NOT `keccak256(proposalData)`. The `abi.encode` wrapper adds a 32-byte offset and 32-byte length prefix before the raw bytes. Off-chain tools verifying proposal hashes must use the same double-encoding: `keccak256(ethers.AbiCoder.defaultAbiCoder().encode(["bytes"], [proposalData]))`.
+
 #### `SponsorProposal`
 
 ```solidity
@@ -450,14 +452,14 @@ event Onboard(
 event Onboard(
     address indexed daoShipAddress,
     address indexed contributor,
-    uint256 tributeAmount,
+    uint256 amount,
     uint256 shares,
     uint256 loot
 );
 ```
 
 **Handler action:**
-- Same as OnboarderNavigator but `tributeAmount` is in ERC20 tokens (not native QUAI)
+- Same event signature as OnboarderNavigator. `amount` is in ERC20 tokens (not native QUAI)
 - The tribute token address is available from the navigator contract's `tributeToken()` view function (call once at registration time)
 
 **Note:** Both `onboard()` and `onboardWithPermit()` emit the same `Onboard` event. The indexer does not need to distinguish between the two entry points -- the event signature and handler logic are identical regardless of whether the user used standard approve or ERC-2612 permit.
@@ -495,7 +497,7 @@ event NewPost(
 - Parse `content` as JSON if it starts with `{`
 - See [docs/POSTER.md](POSTER.md) for the complete domain schema and trust model
 
-**Tag-based routing (7 tags total — see [POSTER.md](POSTER.md) for full schemas):**
+**Tag-based routing (6 tags total — see [POSTER.md](POSTER.md) for full schemas):**
 
 | Tag | Action | Trust Check |
 |-----|--------|-------------|
@@ -1006,3 +1008,61 @@ Read from `deployment-addresses.json` in the contracts repo:
 ```
 
 The indexer monitors `DAOShipLauncher` and `DAOShipAndVaultLauncher` for launch events, and `Poster` for metadata. Individual DAOShip clones, token clones, and navigator addresses are discovered dynamically from events.
+
+---
+
+## Contract Changes Log (SSSES Audits v4-v8)
+
+**No ABI-breaking changes across all audit rounds.** All existing event signatures, function selectors, and return types are preserved. This section documents behavioral changes and new features the indexer team should be aware of.
+
+### Indexer Action Required
+
+| Change | Impact | What to do |
+|--------|--------|------------|
+| **`state()` now returns Expired for unsponsored expired proposals (v6)** | Previously, an unsponsored proposal past its explicit expiration returned `Submitted (1)`. Now correctly returns `Expired (8)`. | If the indexer calls `state()` to display proposal status, expired unsponsored proposals will now show as Expired instead of Submitted. No code change needed unless the indexer had a workaround for the old behavior. |
+| **Defeated proposals require empty calldata (v6)** | `processProposal(id, proposalData)` now reverts with `HashMismatch()` if `proposalData` is non-empty for a Defeated proposal. Previously accepted any data. | If the indexer or a keeper bot calls `processProposal` to close defeated proposals, pass `"0x"` (empty bytes) as `proposalData`. Non-empty data will revert. |
+| **OOG grief protection (v5)** | If `processProposal` catches an OOG revert and `gasleft() < 50,000`, the entire transaction reverts with `InsufficientProcessGas()` instead of marking `actionFailed=true`. The proposal stays in Ready state. | If the indexer monitors for failed `processProposal` transactions, distinguish `InsufficientProcessGas` (proposal still Ready, can be retried with more gas) from `actionFailed=true` in `ProcessProposal` event (proposal permanently consumed). |
+
+### No Action Required (internal refactoring, no indexer impact)
+
+| Change | Audit | Description |
+|--------|-------|-------------|
+| Ragequit balance snapshot | v4 H-1 | Guild token balances snapshotted before transfers. `Ragequit` event unchanged. |
+| Token singleton bricking | v4 H-2 | Singleton constructors renounce ownership. Clones behave identically. |
+| setUp navigator cap | v4 M-1 | setUp rejects > 20 navigators. `NavigatorSet` events unchanged. |
+| Post-execution module check | v4 M-7 | processProposal reverts if proposal removes DAOShip as vault module. `ProcessProposal` event unchanged. |
+| Proposal struct reorder + statusFlags | v7 L-3/L-4 | Internal storage layout change. `getProposalStatus()` still returns `bool[4]` with identical semantics. |
+| Dead code removal | v7 L-5/L-6 | Removed unreachable checks. No behavioral change. |
+| Loop gas optimization | v7 L-1/L-2 | totalShares/totalLoot cached in memory. Final values identical. |
+| BaseNavigator extraction | v7 L-11 | Shared logic extracted to abstract base. Event signatures unchanged. |
+| DAOShipPermit extraction | v7 L-12 | Shared permit logic extracted. `permit()` signature unchanged. |
+| OnboarderNavigator calldata refactor | v7 L-7 | `onboard(bytes32[])` parameter `memory` → `calldata`. ABI selector unchanged. |
+| withdrawStuckETH nonReentrant | v7 L-8 | Added reentrancy guard. No event changes. |
+| withdrawStuckTokens nonReentrant | v6 | Added reentrancy guard to ERC20TributeNavigator. No event changes. |
+| OnboarderNavigator receive() nonReentrant | v5 C-1 | Added reentrancy guard to `receive()`. No event changes. |
+| getPriorVotes bounds check | v7 L-9 | Reverts with `TimepointOverflow()` for timepoints > uint40 max. |
+| Vault code-size check | v7 L-10 | `launchDAOShipWithVault` rejects EOA vault addresses. |
+| delegate(address(0)) blocked | v8 | `delegate(address(0))` reverts with `InvalidDelegatee()`. Self-delegate to "undelegate." |
+| Bitwise parentheses | v8 | `(flags & CONSTANT) != 0` — readability only, no behavioral change. |
+| ADMIN NatSpec corrected | v8 | ADMIN permission description corrected to "pause/unpause tokens" only. |
+
+### New Custom Errors (v4-v8)
+
+These errors may appear in failed transaction revert data. Update error decoding if the indexer surfaces revert reasons:
+
+| Error | Contract | Audit | Condition |
+|-------|----------|-------|-----------|
+| `TooManyGuildTokens()` | DAOShip | v4 | setUp or setGuildTokens exceeds MAX_GUILD_TOKENS (20) |
+| `TooManyNavigators()` | DAOShip | v4 | setUp exceeds MAX_NAVIGATORS_PER_CALL (20) |
+| `TimepointOverflow()` | DAOShipVotes | v7 | getPriorVotes/getPastTotalSupply with timepoint > uint40 max |
+| `NotAllowlisted()` | OnboarderNavigator | v4 | Plain ETH send to allowlisted navigator via receive() |
+| `InsufficientProcessGas()` | DAOShip | v5 | processProposal caught OOG with gasleft < 50,000 — proposal stays Ready |
+| `InvalidDelegatee()` | DAOShipVotes | v8 | delegate(address(0)) — use self-delegation instead |
+
+### `proposalDataHash` Encoding
+
+`proposalDataHash` in the `SubmitProposal` event is `keccak256(abi.encode(proposalData))`, NOT `keccak256(proposalData)`. The `abi.encode` wrapper adds a 32-byte offset and length prefix. Off-chain hash verification must use:
+
+```typescript
+const hash = keccak256(AbiCoder.defaultAbiCoder().encode(["bytes"], [proposalData]));
+```

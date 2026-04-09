@@ -278,9 +278,9 @@ daoships-contracts/
 `post(content, tag)` is the primary entry point. Content is typically an IPFS hash or JSON string; tag is a namespaced string used for filtering (e.g. `"daoships.launcher.daoProfile"`, `"proposal"`). Because only events are emitted, gas cost is minimal — around 25K gas regardless of content length.
 
 **Navigator permissions** are additive bitmasks:
-- `1` ADMIN — pause/unpause tokens, set guild tokens, manage other navigators
+- `1` ADMIN — pause/unpause tokens
 - `2` MANAGER — mint and burn shares/loot
-- `4` GOVERNOR — cancel proposals, set governance config, authorize pause/unpause of other navigators
+- `4` GOVERNOR — cancel proposals, set governance config
 - Combined: `3` = ADMIN+MANAGER, `6` = MANAGER+GOVERNOR, `7` = full access
 
 ---

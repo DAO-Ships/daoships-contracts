@@ -21,20 +21,33 @@ describe("Ragequit E2E Tests", function () {
   async function deployDAOWithTreasury() {
     const [deployer, alice, bob, carol] = await ethers.getSigners();
 
-    // Deploy tokens
+    // Deploy token singletons (bricked by constructor)
     const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-    const shares = await SharesERC20.deploy();
+    const sharesImpl = await SharesERC20.deploy();
     const LootERC20 = await ethers.getContractFactory("LootERC20");
-    const loot = await LootERC20.deploy();
+    const lootImpl = await LootERC20.deploy();
+
+    // Create EIP-1167 clones for tokens
+    function makeCloneBytecode(addr: string) {
+      const padded = addr.slice(2).toLowerCase().padStart(40, "0");
+      return `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${padded}5af43d82803e903d91602b57fd5bf3`;
+    }
+    const sharesCloneFactory = new ethers.ContractFactory([], makeCloneBytecode(await sharesImpl.getAddress()), deployer);
+    const sharesCloneRaw = await sharesCloneFactory.deploy();
+    const shares = SharesERC20.attach(await sharesCloneRaw.getAddress()) as any;
+
+    const lootCloneFactory = new ethers.ContractFactory([], makeCloneBytecode(await lootImpl.getAddress()), deployer);
+    const lootCloneRaw = await lootCloneFactory.deploy();
+    const loot = LootERC20.attach(await lootCloneRaw.getAddress()) as any;
 
     // Deploy DAOShip as EIP-1167 clone (constructor sets avatar=0xdead to guard singleton)
     const DAOShipFactory = await ethers.getContractFactory("DAOShip");
     const daoShipImpl = await DAOShipFactory.deploy();
     await daoShipImpl.waitForDeployment();
-    const implAddr = (await daoShipImpl.getAddress()).slice(2).toLowerCase().padStart(40, "0");
-    const cloneBytecode = `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${implAddr}5af43d82803e903d91602b57fd5bf3`;
-    const cloneFactory = new ethers.ContractFactory([], cloneBytecode, deployer);
-    const cloneDeploy = await cloneFactory.deploy();
+    const daoShipImplAddr = (await daoShipImpl.getAddress()).slice(2).toLowerCase().padStart(40, "0");
+    const daoShipCloneBytecode = `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${daoShipImplAddr}5af43d82803e903d91602b57fd5bf3`;
+    const daoShipCloneFactory = new ethers.ContractFactory([], daoShipCloneBytecode, deployer);
+    const cloneDeploy = await daoShipCloneFactory.deploy();
     await cloneDeploy.waitForDeployment();
     const daoShip = DAOShipFactory.attach(await cloneDeploy.getAddress()) as any;
 
@@ -49,9 +62,9 @@ describe("Ragequit E2E Tests", function () {
     const MultiSend = await ethers.getContractFactory("MultiSend");
     const multisend = await MultiSend.deploy();
 
-    // Transfer ownership
-    await shares.transferOwnership(await daoShip.getAddress());
-    await loot.transferOwnership(await daoShip.getAddress());
+    // Initialize token clones with DAOShip as owner
+    await shares.initialize(await daoShip.getAddress(), "Test Shares", "TSH");
+    await loot.initialize(await daoShip.getAddress(), "Test Loot", "TLT");
 
     // Governance config with 66% retention (members must leave 66% of supply)
     const votingPeriod = 3600; // 1 hour (minimum required by M-7 fix)

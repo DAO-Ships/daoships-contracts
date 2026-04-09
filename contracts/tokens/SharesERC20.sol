@@ -2,13 +2,10 @@
 pragma solidity ^0.8.22;
 
 import "./DAOShipVotes.sol";
+import "./DAOShipPermit.sol";
 import "../interfaces/IDAOShipToken.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Pausable.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
-import "@openzeppelin/contracts/utils/Nonces.sol";
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
@@ -19,35 +16,20 @@ import "@openzeppelin/contracts/access/Ownable.sol";
  *
  * Key Features:
  * - ERC20Votes: Delegation and historical voting power queries
- * - ERC20Permit (EIP-2612): Gasless approvals via signatures
+ * - ERC20Permit (EIP-2612): Gasless approvals via signatures (via DAOShipPermit)
  * - Pausable: Admin navigators can pause transfers
  * - Auto-delegation: First mint auto-delegates to self for convenience
  * - Owner-controlled: Only DAOShip contract (owner) can mint/burn
- *
- * EIP-2612 Note:
- *   OZ's ERC20Permit uses EIP712 with immutable name storage, which breaks on
- *   EIP-1167 clones (immutables are baked into the singleton's bytecode, not the
- *   clone's storage). This contract implements IERC20Permit + Nonces directly with
- *   a clone-safe EIP-712 domain that reads from _customName storage.
  */
-contract SharesERC20 is DAOShipVotes, ERC20Pausable, Ownable, Nonces, IDAOShipToken, IERC20Permit {
+contract SharesERC20 is DAOShipVotes, ERC20Pausable, Ownable, DAOShipPermit, IDAOShipToken {
     /// @dev Custom name/symbol storage for EIP-1167 clones (OZ ERC20._name/_symbol are private)
     string private _customName;
     string private _customSymbol;
-
-    // EIP-712 constants for clone-safe Permit implementation
-    bytes32 private constant _TYPE_HASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-    bytes32 private constant _PERMIT_TYPEHASH =
-        keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
-    bytes32 private constant _HASHED_VERSION = keccak256(bytes("1"));
 
     /// @notice Maximum mintable supply — aligned with uint216 checkpoint packing.
     ///         Also ensures shares + loot totalSupply in DAOShip cannot overflow uint256.
     uint256 public constant MINT_CAP = type(uint216).max;
 
-    error ERC2612ExpiredSignature(uint256 deadline);
-    error ERC2612InvalidSigner(address signer, address owner);
     error MintCapExceeded();
 
     /**
@@ -56,7 +38,12 @@ contract SharesERC20 is DAOShipVotes, ERC20Pausable, Ownable, Nonces, IDAOShipTo
      *      For EIP-1167 clones, storage is empty so owner() returns address(0)
      *      Clones must call initialize() to set owner and token metadata
      */
-    constructor() ERC20("DAOShip Shares", "SHARES") Ownable(msg.sender) {}
+    constructor() ERC20("DAOShip Shares", "SHARES") Ownable(msg.sender) {
+        // Brick the singleton: renounce ownership so the implementation contract
+        // cannot be used directly. EIP-1167 clones have zeroed storage (owner == address(0)),
+        // so initialize() remains callable on clones.
+        renounceOwnership();
+    }
 
     /**
      * @notice Initialize token clone with owner and metadata
@@ -145,60 +132,6 @@ contract SharesERC20 is DAOShipVotes, ERC20Pausable, Ownable, Nonces, IDAOShipTo
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // EIP-2612 PERMIT (clone-safe implementation)
-    // ═══════════════════════════════════════════════════════════════════════════════
-
-    /// @inheritdoc IERC20Permit
-    function permit(
-        address owner,
-        address spender,
-        uint256 value,
-        uint256 deadline,
-        uint8 v,
-        bytes32 r,
-        bytes32 s
-    ) external override {
-        if (block.timestamp > deadline) {
-            revert ERC2612ExpiredSignature(deadline);
-        }
-
-        bytes32 structHash = keccak256(
-            abi.encode(_PERMIT_TYPEHASH, owner, spender, value, _useNonce(owner), deadline)
-        );
-        bytes32 hash = MessageHashUtils.toTypedDataHash(_domainSeparatorV4(), structHash);
-        address signer = ECDSA.recover(hash, v, r, s);
-        if (signer != owner) {
-            revert ERC2612InvalidSigner(signer, owner);
-        }
-
-        _approve(owner, spender, value);
-    }
-
-    /// @inheritdoc IERC20Permit
-    function nonces(address owner) public view override(IERC20Permit, Nonces) returns (uint256) {
-        return super.nonces(owner);
-    }
-
-    /// @inheritdoc IERC20Permit
-    // solhint-disable-next-line func-name-mixedcase
-    function DOMAIN_SEPARATOR() external view override returns (bytes32) {
-        return _domainSeparatorV4();
-    }
-
-    /**
-     * @notice Compute EIP-712 domain separator from clone storage
-     * @dev Cannot use OZ's EIP712 because it stores name as an immutable (baked into
-     *      singleton bytecode). Clones need to read from _customName storage instead.
-     *      Recomputed on every call — no caching, since the cache would belong to the
-     *      singleton. On Quai's low-fee network, the extra ~2K gas is negligible.
-     */
-    function _domainSeparatorV4() internal view returns (bytes32) {
-        return keccak256(
-            abi.encode(_TYPE_HASH, keccak256(bytes(name())), _HASHED_VERSION, block.chainid, address(this))
-        );
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════════
     // INTERNAL OVERRIDES
     // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -208,7 +141,7 @@ contract SharesERC20 is DAOShipVotes, ERC20Pausable, Ownable, Nonces, IDAOShipTo
      */
     function _update(address from, address to, uint256 value)
         internal
-        override(DAOShipVotes, ERC20Pausable)
+        override(DAOShipVotes, ERC20, ERC20Pausable)
     {
         // Check pause status (doesn't apply to mint/burn)
         if (from != address(0) && to != address(0)) {

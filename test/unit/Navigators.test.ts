@@ -3,6 +3,33 @@ import { ethers } from "hardhat";
 import { loadFixture, time } from "@nomicfoundation/hardhat-network-helpers";
 import { deployNavigatorFixture, deployDAOShipFixture } from "../fixtures";
 
+/** Create EIP-1167 clone bytecode for a given implementation address */
+function makeCloneBytecodeNav(addr: string) {
+  const padded = addr.slice(2).toLowerCase().padStart(40, "0");
+  return `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${padded}5af43d82803e903d91602b57fd5bf3`;
+}
+
+/** Deploy EIP-1167 clones for SharesERC20 and LootERC20 tokens, then initialize them */
+async function deployTokenClones(deployer: any, ownerAddress: string) {
+  const SharesERC20 = await ethers.getContractFactory("SharesERC20");
+  const sharesImpl = await SharesERC20.deploy();
+  const LootERC20 = await ethers.getContractFactory("LootERC20");
+  const lootImpl = await LootERC20.deploy();
+
+  const sharesCloneFactory = new ethers.ContractFactory([], makeCloneBytecodeNav(await sharesImpl.getAddress()), deployer);
+  const sharesCloneRaw = await sharesCloneFactory.deploy();
+  const shares = SharesERC20.attach(await sharesCloneRaw.getAddress()) as any;
+
+  const lootCloneFactory = new ethers.ContractFactory([], makeCloneBytecodeNav(await lootImpl.getAddress()), deployer);
+  const lootCloneRaw = await lootCloneFactory.deploy();
+  const loot = LootERC20.attach(await lootCloneRaw.getAddress()) as any;
+
+  await shares.initialize(ownerAddress, "Test Shares", "TSH");
+  await loot.initialize(ownerAddress, "Test Loot", "TLT");
+
+  return { shares, loot };
+}
+
 /** Deploy a DAOShip EIP-1167 minimal-proxy clone so setUp() isn't blocked by the singleton guard */
 async function deployDAOShipClone(deployer: any) {
   const DAOShipFactory = await ethers.getContractFactory("DAOShip");
@@ -84,18 +111,13 @@ describe("Navigator Contracts", function () {
     async function deployFixedPriceOnboarder() {
       const [deployer, alice, bob] = await ethers.getSigners();
 
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot = await LootERC20.deploy();
       const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar = await MockAvatar.deploy();
       await avatar.enableModule(await daoShip.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend = await MultiSend.deploy();
-      await shares.transferOwnership(await daoShip.getAddress());
-      await loot.transferOwnership(await daoShip.getAddress());
 
       // Fixed-price mode: 0.1 QUAI per share, no loot
       const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator");
@@ -158,18 +180,13 @@ describe("Navigator Contracts", function () {
     async function deployCappedOnboarder() {
       const [deployer, alice, bob] = await ethers.getSigners();
 
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot = await LootERC20.deploy();
       const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar = await MockAvatar.deploy();
       await avatar.enableModule(await daoShip.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend = await MultiSend.deploy();
-      await shares.transferOwnership(await daoShip.getAddress());
-      await loot.transferOwnership(await daoShip.getAddress());
 
       // Multiplier mode with 10 share cap
       const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator");
@@ -259,18 +276,13 @@ describe("Navigator Contracts", function () {
       const currentTime = await time.latest();
       const expiryTime = currentTime + 7 * 24 * 60 * 60;
 
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot = await LootERC20.deploy();
       const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar = await MockAvatar.deploy();
       await avatar.enableModule(await daoShip.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend = await MultiSend.deploy();
-      await shares.transferOwnership(await daoShip.getAddress());
-      await loot.transferOwnership(await daoShip.getAddress());
 
       const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator");
       const onboarder = await OnboarderNavigator.deploy(
@@ -311,18 +323,13 @@ describe("Navigator Contracts", function () {
     async function deployERC20TributeFixture() {
       const [deployer, alice, bob] = await ethers.getSigners();
 
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot = await LootERC20.deploy();
       const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar = await MockAvatar.deploy();
       await avatar.enableModule(await daoShip.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend = await MultiSend.deploy();
-      await shares.transferOwnership(await daoShip.getAddress());
-      await loot.transferOwnership(await daoShip.getAddress());
 
       // Deploy a mock ERC20 as tribute token
       const MockERC20 = await ethers.getContractFactory("MockERC20");
@@ -414,18 +421,13 @@ describe("Navigator Contracts", function () {
     it("Should enforce mint cap", async function () {
       const [deployer, alice] = await ethers.getSigners();
 
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot = await LootERC20.deploy();
       const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar = await MockAvatar.deploy();
       await avatar.enableModule(await daoShip.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend = await MultiSend.deploy();
-      await shares.transferOwnership(await daoShip.getAddress());
-      await loot.transferOwnership(await daoShip.getAddress());
 
       const MockERC20 = await ethers.getContractFactory("MockERC20");
       const tributeToken = await MockERC20.deploy("Mock", "MCK");
@@ -499,18 +501,13 @@ describe("Navigator Contracts", function () {
     it("Should mint loot for ERC20 tribute (pricePerLoot, no shares)", async function () {
       const [deployer, alice] = await ethers.getSigners();
 
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot = await LootERC20.deploy();
       const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar = await MockAvatar.deploy();
       await avatar.enableModule(await daoShip.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend = await MultiSend.deploy();
-      await shares.transferOwnership(await daoShip.getAddress());
-      await loot.transferOwnership(await daoShip.getAddress());
 
       const MockERC20 = await ethers.getContractFactory("MockERC20");
       const tributeToken = await MockERC20.deploy("Mock USDC", "USDC");
@@ -555,18 +552,13 @@ describe("Navigator Contracts", function () {
     it("Should mint both shares and loot in one onboard call", async function () {
       const [deployer, alice] = await ethers.getSigners();
 
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot = await LootERC20.deploy();
       const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar = await MockAvatar.deploy();
       await avatar.enableModule(await daoShip.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend = await MultiSend.deploy();
-      await shares.transferOwnership(await daoShip.getAddress());
-      await loot.transferOwnership(await daoShip.getAddress());
 
       const MockERC20 = await ethers.getContractFactory("MockERC20");
       const tributeToken = await MockERC20.deploy("Mock USDC", "USDC");
@@ -618,18 +610,13 @@ describe("Navigator Contracts", function () {
       const currentTime = await time.latest();
       const expiryTime = currentTime + 7 * 24 * 60 * 60;
 
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot = await LootERC20.deploy();
       const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar = await MockAvatar.deploy();
       await avatar.enableModule(await daoShip.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend = await MultiSend.deploy();
-      await shares.transferOwnership(await daoShip.getAddress());
-      await loot.transferOwnership(await daoShip.getAddress());
 
       const MockERC20 = await ethers.getContractFactory("MockERC20");
       const tributeToken = await MockERC20.deploy("Mock USDC", "USDC");
@@ -793,27 +780,14 @@ describe("Navigator Contracts", function () {
       // To hit the guard, we need threshold == supply. Re-deploy with matching values.
       const [deployer, alice, bob] = await ethers.getSigners();
 
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot = await LootERC20.deploy();
-      const DAOShipFactory = await ethers.getContractFactory("DAOShip");
-      const daoShipImpl = await DAOShipFactory.deploy();
-      await daoShipImpl.waitForDeployment();
-      const implAddr = (await daoShipImpl.getAddress()).slice(2).toLowerCase().padStart(40, "0");
-      const cloneBytecode = `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${implAddr}5af43d82803e903d91602b57fd5bf3`;
-      const cloneFactory = new ethers.ContractFactory([], cloneBytecode, deployer);
-      const cloneDeploy = await cloneFactory.deploy();
-      await cloneDeploy.waitForDeployment();
-      const daoShip = DAOShipFactory.attach(await cloneDeploy.getAddress()) as any;
+      const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
 
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar = await MockAvatar.deploy();
       await avatar.enableModule(await daoShip.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend = await MultiSend.deploy();
-      await shares.transferOwnership(await daoShip.getAddress());
-      await loot.transferOwnership(await daoShip.getAddress());
 
       // sponsorThreshold = totalSupply = 100 shares; alice acts as MANAGER navigator
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
@@ -842,27 +816,14 @@ describe("Navigator Contracts", function () {
       // totalSupply=100 shares, sponsorThreshold=50 shares, burn 10 → 90 >= 50 OK
       const [deployer, alice] = await ethers.getSigners();
 
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot = await LootERC20.deploy();
-      const DAOShipFactory = await ethers.getContractFactory("DAOShip");
-      const daoShipImpl = await DAOShipFactory.deploy();
-      await daoShipImpl.waitForDeployment();
-      const implAddr = (await daoShipImpl.getAddress()).slice(2).toLowerCase().padStart(40, "0");
-      const cloneBytecode = `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${implAddr}5af43d82803e903d91602b57fd5bf3`;
-      const cloneFactory = new ethers.ContractFactory([], cloneBytecode, deployer);
-      const cloneDeploy = await cloneFactory.deploy();
-      await cloneDeploy.waitForDeployment();
-      const daoShip = DAOShipFactory.attach(await cloneDeploy.getAddress()) as any;
+      const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
 
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar = await MockAvatar.deploy();
       await avatar.enableModule(await daoShip.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend = await MultiSend.deploy();
-      await shares.transferOwnership(await daoShip.getAddress());
-      await loot.transferOwnership(await daoShip.getAddress());
 
       const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
         ["uint32", "uint32", "uint256", "uint256", "uint256", "uint256", "uint32"],
@@ -933,18 +894,13 @@ describe("Navigator Contracts", function () {
     async function deployMerkleAllowlistFixture() {
       const [deployer, alice, bob, carol] = await ethers.getSigners();
 
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot = await LootERC20.deploy();
       const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar = await MockAvatar.deploy();
       await avatar.enableModule(await daoShip.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend = await MultiSend.deploy();
-      await shares.transferOwnership(await daoShip.getAddress());
-      await loot.transferOwnership(await daoShip.getAddress());
 
       // Build Merkle tree for alice and bob
       const { root, proofs } = buildMerkleTree([alice.address, bob.address]);
@@ -1225,18 +1181,13 @@ describe("Navigator Contracts", function () {
     async function deployPermitFixture() {
       const [deployer, alice, bob] = await ethers.getSigners();
 
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot = await LootERC20.deploy();
       const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar = await MockAvatar.deploy();
       await avatar.enableModule(await daoShip.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend = await MultiSend.deploy();
-      await shares.transferOwnership(await daoShip.getAddress());
-      await loot.transferOwnership(await daoShip.getAddress());
 
       // Deploy MockERC20Permit as tribute token
       const MockERC20Permit = await ethers.getContractFactory("MockERC20Permit");
@@ -1397,17 +1348,12 @@ describe("Navigator Contracts", function () {
       await plainToken.mint(alice.address, ethers.parseEther("10000"));
 
       const daoShip2 = await deployDAOShipClone(deployer);
-      const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-      const shares2 = await SharesERC20.deploy();
-      const LootERC20 = await ethers.getContractFactory("LootERC20");
-      const loot2 = await LootERC20.deploy();
+      const { shares: shares2, loot: loot2 } = await deployTokenClones(deployer, await daoShip2.getAddress());
       const MockAvatar = await ethers.getContractFactory("MockAvatar");
       const avatar2 = await MockAvatar.deploy();
       await avatar2.enableModule(await daoShip2.getAddress());
       const MultiSend = await ethers.getContractFactory("MultiSend");
       const multisend2 = await MultiSend.deploy();
-      await shares2.transferOwnership(await daoShip2.getAddress());
-      await loot2.transferOwnership(await daoShip2.getAddress());
 
       const ERC20TributeNavigator = await ethers.getContractFactory("ERC20TributeNavigator");
       const nav = await ERC20TributeNavigator.deploy(

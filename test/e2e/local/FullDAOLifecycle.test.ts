@@ -16,20 +16,33 @@ describe("Full DAO Lifecycle E2E", function () {
   async function deployDAOWithFastGovernance() {
     const [deployer, alice, bob, carol, dave] = await ethers.getSigners();
 
-    // Deploy tokens
+    // Deploy token singletons (bricked by constructor)
     const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-    const shares = await SharesERC20.deploy();
+    const sharesImpl = await SharesERC20.deploy();
     const LootERC20 = await ethers.getContractFactory("LootERC20");
-    const loot = await LootERC20.deploy();
+    const lootImpl = await LootERC20.deploy();
+
+    // Create EIP-1167 clones for tokens
+    function makeCloneBytecode(addr: string) {
+      const padded = addr.slice(2).toLowerCase().padStart(40, "0");
+      return `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${padded}5af43d82803e903d91602b57fd5bf3`;
+    }
+    const sharesCloneFactory = new ethers.ContractFactory([], makeCloneBytecode(await sharesImpl.getAddress()), deployer);
+    const sharesCloneRaw = await sharesCloneFactory.deploy();
+    const shares = SharesERC20.attach(await sharesCloneRaw.getAddress()) as any;
+
+    const lootCloneFactory = new ethers.ContractFactory([], makeCloneBytecode(await lootImpl.getAddress()), deployer);
+    const lootCloneRaw = await lootCloneFactory.deploy();
+    const loot = LootERC20.attach(await lootCloneRaw.getAddress()) as any;
 
     // Deploy DAOShip as EIP-1167 clone (constructor sets avatar=0xdead to guard singleton)
     const DAOShipFactory = await ethers.getContractFactory("DAOShip");
     const daoShipImpl = await DAOShipFactory.deploy();
     await daoShipImpl.waitForDeployment();
-    const implAddr = (await daoShipImpl.getAddress()).slice(2).toLowerCase().padStart(40, "0");
-    const cloneBytecode = `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${implAddr}5af43d82803e903d91602b57fd5bf3`;
-    const cloneFactory = new ethers.ContractFactory([], cloneBytecode, deployer);
-    const cloneDeploy = await cloneFactory.deploy();
+    const daoShipImplAddr = (await daoShipImpl.getAddress()).slice(2).toLowerCase().padStart(40, "0");
+    const daoShipCloneBytecode = `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${daoShipImplAddr}5af43d82803e903d91602b57fd5bf3`;
+    const daoShipCloneFactory = new ethers.ContractFactory([], daoShipCloneBytecode, deployer);
+    const cloneDeploy = await daoShipCloneFactory.deploy();
     await cloneDeploy.waitForDeployment();
     const daoShip = DAOShipFactory.attach(await cloneDeploy.getAddress()) as any;
 
@@ -44,9 +57,9 @@ describe("Full DAO Lifecycle E2E", function () {
     const MultiSend = await ethers.getContractFactory("MultiSend");
     const multisend = await MultiSend.deploy();
 
-    // Transfer ownership
-    await shares.transferOwnership(await daoShip.getAddress());
-    await loot.transferOwnership(await daoShip.getAddress());
+    // Initialize token clones with DAOShip as owner
+    await shares.initialize(await daoShip.getAddress(), "Test Shares", "TSH");
+    await loot.initialize(await daoShip.getAddress(), "Test Loot", "TLT");
 
     // Deploy navigators
     const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator");
@@ -569,8 +582,8 @@ describe("Full DAO Lifecycle E2E", function () {
     // Wait for periods
     await time.increase(votingPeriod + gracePeriod + 5);
 
-    // Process
-    await daoShip.processProposal(1, proposalData);
+    // Process defeated proposal with empty data (defeated proposals require empty calldata)
+    await daoShip.processProposal(1, "0x");
 
     // Verify proposal failed
     const status = await daoShip.getProposalStatus(1);
@@ -617,20 +630,33 @@ describe("Full DAO Lifecycle E2E", function () {
 
     console.log("\n=== Testing ERC20TributeNavigator Onboarding ===");
 
-    // Deploy tokens
+    // Deploy token singletons (bricked by constructor)
     const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-    const shares = await SharesERC20.deploy();
+    const sharesImpl = await SharesERC20.deploy();
     const LootERC20 = await ethers.getContractFactory("LootERC20");
-    const loot = await LootERC20.deploy();
+    const lootImpl = await LootERC20.deploy();
+
+    // Create EIP-1167 clones for tokens
+    function makeCloneBytecodeE(addr: string) {
+      const padded = addr.slice(2).toLowerCase().padStart(40, "0");
+      return `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${padded}5af43d82803e903d91602b57fd5bf3`;
+    }
+    const sharesCloneFactory = new ethers.ContractFactory([], makeCloneBytecodeE(await sharesImpl.getAddress()), deployer);
+    const sharesCloneRaw = await sharesCloneFactory.deploy();
+    const shares = SharesERC20.attach(await sharesCloneRaw.getAddress()) as any;
+
+    const lootCloneFactory = new ethers.ContractFactory([], makeCloneBytecodeE(await lootImpl.getAddress()), deployer);
+    const lootCloneRaw = await lootCloneFactory.deploy();
+    const loot = LootERC20.attach(await lootCloneRaw.getAddress()) as any;
 
     // Deploy DAOShip as EIP-1167 clone
     const DAOShipFactory = await ethers.getContractFactory("DAOShip");
     const daoShipImpl = await DAOShipFactory.deploy();
     await daoShipImpl.waitForDeployment();
-    const implAddr = (await daoShipImpl.getAddress()).slice(2).toLowerCase().padStart(40, "0");
-    const cloneBytecode = `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${implAddr}5af43d82803e903d91602b57fd5bf3`;
-    const cloneFactory = new ethers.ContractFactory([], cloneBytecode, deployer);
-    const cloneDeploy = await cloneFactory.deploy();
+    const daoShipImplAddr = (await daoShipImpl.getAddress()).slice(2).toLowerCase().padStart(40, "0");
+    const daoShipCloneBytecode = `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${daoShipImplAddr}5af43d82803e903d91602b57fd5bf3`;
+    const daoShipCloneFactory = new ethers.ContractFactory([], daoShipCloneBytecode, deployer);
+    const cloneDeploy = await daoShipCloneFactory.deploy();
     await cloneDeploy.waitForDeployment();
     const daoShip = DAOShipFactory.attach(await cloneDeploy.getAddress()) as any;
 
@@ -640,8 +666,8 @@ describe("Full DAO Lifecycle E2E", function () {
     const MultiSend = await ethers.getContractFactory("MultiSend");
     const multisend = await MultiSend.deploy();
 
-    await shares.transferOwnership(await daoShip.getAddress());
-    await loot.transferOwnership(await daoShip.getAddress());
+    await shares.initialize(await daoShip.getAddress(), "Test Shares", "TSH");
+    await loot.initialize(await daoShip.getAddress(), "Test Loot", "TLT");
 
     // Deploy a mock ERC20 tribute token (e.g. stablecoin)
     const MockERC20 = await ethers.getContractFactory("MockERC20");

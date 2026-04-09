@@ -199,6 +199,7 @@ contract DAOShipAndVaultLauncher {
         uint256 daoShipSalt
     ) external returns (address payable daoShip) {
         require(existingVault != address(0), "DAOShipAndVaultLauncher: invalid vault");
+        require(existingVault.code.length > 0, "DAOShipAndVaultLauncher: vault has no code");
 
         // Replace avatar placeholder with existing vault address
         bytes memory actualInitParams = _replaceAvatar(initializationParamsTemplate, existingVault);
@@ -228,6 +229,13 @@ contract DAOShipAndVaultLauncher {
      *      addresses must match the shard prefix, e.g. 0x00... for cyprus1).
      *      Use calculateAllAddresses to verify that mined salts produce addresses on
      *      the correct shard before submitting the launch transaction.
+     *
+     *      IMPORTANT: `minExecutionDelay` must be 0 to match the actual launch.
+     *      `launchDAOShipAndVault` hardcodes `minExecutionDelay = 0` when creating
+     *      vaults. Passing any other value here produces a vault prediction that
+     *      will NOT match the deployed address, wasting salt-mining compute.
+     *      Execution delays for DAO vaults require vault-owner processing overhead
+     *      and are not currently supported by the launcher.
      *
      *      Predicts the DAOShip address first, then uses it as an initialModule when
      *      predicting the vault address — mirroring the actual launch flow.

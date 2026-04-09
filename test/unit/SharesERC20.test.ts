@@ -170,6 +170,16 @@ describe("SharesERC20", function () {
         shares.getPriorVotes(deployer.address, futureTimestamp)
       ).to.be.revertedWith("DAOShipVotes: not yet determined");
     });
+
+    it("Should revert with TimepointOverflow when timepoint exceeds uint40 max", async function () {
+      const { shares, deployer } = await deployDAOShipFixture();
+
+      const overflowTimepoint = BigInt("0xFFFFFFFFFF") + 1n; // type(uint40).max + 1
+
+      await expect(
+        shares.getPriorVotes(deployer.address, overflowTimepoint)
+      ).to.be.revertedWithCustomError(shares, "TimepointOverflow");
+    });
   });
 
   describe("Pausability", function () {
@@ -298,15 +308,44 @@ describe("SharesERC20", function () {
   });
 
   describe("Edge Cases", function () {
-    it("Should handle zero address delegation", async function () {
+    it("Should revert delegate(address(0)) with InvalidDelegatee", async function () {
       const { shares, deployer } = await deployDAOShipFixture();
 
-      // Delegate to zero address (undelegation)
-      await shares.connect(deployer).delegate(ethers.ZeroAddress);
+      // delegate(address(0)) would zero the checkpoint, making all subsequent
+      // transfers and burns revert with arithmetic underflow. Blocked by design.
+      await expect(
+        shares.connect(deployer).delegate(ethers.ZeroAddress)
+      ).to.be.revertedWithCustomError(shares, "InvalidDelegatee");
+    });
 
-      expect(await shares.delegates(deployer.address)).to.equal(
-        ethers.ZeroAddress
-      );
+    it("Should allow self-delegation as the undelegate alternative", async function () {
+      const { shares, deployer, alice } = await deployDAOShipFixture();
+
+      // Delegate to alice
+      await shares.connect(deployer).delegate(alice.address);
+      expect(await shares.delegates(deployer.address)).to.equal(alice.address);
+
+      // "Undelegate" by self-delegating
+      await shares.connect(deployer).delegate(deployer.address);
+      expect(await shares.delegates(deployer.address)).to.equal(deployer.address);
+
+      // Verify voting power is back on deployer
+      await time.increase(1);
+      const votes = await shares.getCurrentVotes(deployer.address);
+      expect(votes).to.equal(ethers.parseEther("100"));
+    });
+
+    it("Should still be able to transfer after self-delegation", async function () {
+      const { shares, deployer, alice } = await deployDAOShipFixture();
+
+      // Delegate to alice then back to self
+      await shares.connect(deployer).delegate(alice.address);
+      await shares.connect(deployer).delegate(deployer.address);
+
+      // Transfer should work fine
+      await expect(
+        shares.connect(deployer).transfer(alice.address, ethers.parseEther("10"))
+      ).to.not.be.reverted;
     });
 
     it("Should handle delegation to self", async function () {

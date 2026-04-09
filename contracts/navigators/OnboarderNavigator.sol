@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
-import "../core/DAOShip.sol";
-import "../interfaces/INavigator.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
+import "./BaseNavigator.sol";
 
 /**
  * @title OnboarderNavigator
@@ -22,16 +19,10 @@ import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
  * - ReentrancyGuard on all external entry points
  * - Immutable configuration for gas efficiency
  */
-contract OnboarderNavigator is ReentrancyGuard, INavigator {
+contract OnboarderNavigator is BaseNavigator {
 
     /// @notice Navigator type identifier for indexer discovery
     string public constant navigatorType = "OnboarderNavigator";
-
-    /// @notice Address that deployed this navigator
-    address public immutable deployer;
-
-    /// @notice Associated DAOShip DAO
-    DAOShip public immutable daoShip;
 
     /// @notice Share multiplier in basis points (10000 = 1x). 0 if using fixed-price mode.
     uint256 public immutable shareMultiplier;
@@ -51,41 +42,9 @@ contract OnboarderNavigator is ReentrancyGuard, INavigator {
     /// @notice Minimum native token required to onboard (anti-spam, in wei)
     uint256 public immutable minTribute;
 
-    /// @notice Expiration timestamp (0 = no expiration)
-    uint256 public immutable expiry;
-
-    /// @notice Maximum total shares+loot this navigator can mint (0 = unlimited)
-    uint256 public immutable mintCap;
-
-    /// @notice Maximum shares+loot any single address can receive (0 = unlimited)
-    uint256 public immutable perAddressCap;
-
-    /// @notice Merkle root for allowlist (bytes32(0) = no allowlist, anyone can join)
-    bytes32 public immutable allowlistRoot;
-
-    /// @notice Total shares+loot minted so far
-    uint256 public totalMinted;
-
-    /// @notice Per-address minted tracking
-    mapping(address => uint256) public mintedTo;
-
-    /// @notice Whether the navigator is paused
-    bool public paused;
-
-    event Onboard(address indexed daoShipAddress, address indexed contributor, uint256 amount, uint256 shares, uint256 loot);
-    event Paused(address indexed caller);
-    event Unpaused(address indexed caller);
-
     error InsufficientTribute();
-    error Expired();
-    error MintCapExceeded();
-    error PerAddressCapExceeded();
-    error NotAllowlisted();
-    error IsPaused();
     error TransferFailed();
     error RefundFailed();
-    error NotAuthorized();
-    error InvalidConfig();
 
     /**
      * @notice Deploy OnboarderNavigator
@@ -117,9 +76,7 @@ contract OnboarderNavigator is ReentrancyGuard, INavigator {
         bytes32 _allowlistRoot,
         string memory _name,
         string memory _description
-    ) {
-        if (_daoShip == address(0)) revert InvalidConfig();
-
+    ) BaseNavigator(_daoShip, _expiry, _mintCap, _perAddressCap, _allowlistRoot) {
         // Must be either multiplier mode OR fixed-price mode, not both
         bool isMultiplierMode = _shareMultiplier > 0 || _lootMultiplier > 0;
         bool isFixedPriceMode = _pricePerUnit > 0;
@@ -127,36 +84,73 @@ contract OnboarderNavigator is ReentrancyGuard, INavigator {
         if (isMultiplierMode && isFixedPriceMode) revert InvalidConfig();
         if (isFixedPriceMode && _sharesPerUnit == 0 && _lootPerUnit == 0) revert InvalidConfig();
 
-        deployer = msg.sender;
-        daoShip = DAOShip(payable(_daoShip));
         shareMultiplier = _shareMultiplier;
         lootMultiplier = _lootMultiplier;
         pricePerUnit = _pricePerUnit;
         sharesPerUnit = _sharesPerUnit;
         lootPerUnit = _lootPerUnit;
         minTribute = _minTribute;
-        expiry = _expiry;
-        mintCap = _mintCap;
-        perAddressCap = _perAddressCap;
-        allowlistRoot = _allowlistRoot;
 
         emit NavigatorDeployed(_daoShip, msg.sender, navigatorType, _name, _description);
     }
 
     /**
-     * @notice Onboard by sending native tokens
+     * @notice Onboard by sending native tokens with allowlist proof
      * @param proof Merkle proof for allowlist (empty bytes32[] if no allowlist)
      */
-    function onboard(bytes32[] memory proof) public payable nonReentrant {
+    function onboard(bytes32[] calldata proof) external payable nonReentrant {
+        _onboard(proof);
+    }
+
+    /**
+     * @notice Onboard without allowlist proof (for open onboarding)
+     */
+    function onboard() external payable nonReentrant {
+        _onboard(new bytes32[](0));
+    }
+
+    /**
+     * @notice Withdraw any ETH stuck in this contract (e.g., failed refunds).
+     * @dev Only callable by the DAOShip avatar (governance).
+     *      In fixed-price mode, a refund can fail if the contributor is a contract that
+     *      rejects ETH. Shares are already minted and tribute is already in the vault,
+     *      but the remainder accumulates here. Governance can recover it to any address.
+     * @param to Recipient of the recovered ETH
+     * @param amount Amount of ETH to withdraw (in wei)
+     */
+    function withdrawStuckETH(address payable to, uint256 amount) external nonReentrant {
+        if (msg.sender != daoShip.avatar()) revert NotAuthorized();
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "OnboarderNavigator: withdrawal failed");
+    }
+
+    /**
+     * @notice Accept plain ETH transfers and trigger onboarding.
+     * @dev Delegates to _onboard() with an empty proof so that plain ETH sends
+     *      (e.g., from a wallet or contract that uses transfer/send/call without data)
+     *      participate in onboarding the same as explicit onboard() calls.
+     *      Reverts early with a clear error when an allowlist is active, since
+     *      plain transfers cannot include a Merkle proof.
+     */
+    receive() external payable nonReentrant {
+        if (allowlistRoot != bytes32(0)) revert NotAllowlisted();
+        _onboard(new bytes32[](0));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Internal
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * @notice Internal onboard logic
+     * @dev nonReentrant is on the external entry points, not here.
+     * @param proof Merkle proof for allowlist
+     */
+    function _onboard(bytes32[] memory proof) internal {
         if (paused) revert IsPaused();
         if (expiry != 0 && block.timestamp > expiry) revert Expired();
 
-        // Allowlist check
-        if (allowlistRoot != bytes32(0)) {
-            if (!MerkleProof.verify(proof, allowlistRoot, keccak256(bytes.concat(keccak256(abi.encode(msg.sender)))))) {
-                revert NotAllowlisted();
-            }
-        }
+        _checkAllowlist(proof);
 
         uint256 sharesToMint;
         uint256 lootToMint;
@@ -183,11 +177,7 @@ contract OnboarderNavigator is ReentrancyGuard, INavigator {
         uint256 toMint = sharesToMint + lootToMint;
         if (toMint == 0) revert InsufficientTribute();
 
-        // Mint cap checks
-        if (mintCap > 0 && totalMinted + toMint > mintCap) revert MintCapExceeded();
-        if (perAddressCap > 0 && mintedTo[msg.sender] + toMint > perAddressCap) revert PerAddressCapExceeded();
-        totalMinted += toMint;
-        mintedTo[msg.sender] += toMint;
+        _checkAndUpdateCaps(toMint);
 
         // Mint shares and loot, then forward tribute to treasury.
         // Ordering note: minting happens before tribute transfer. This is safe because:
@@ -196,19 +186,7 @@ contract OnboarderNavigator is ReentrancyGuard, INavigator {
         //   3. If the tribute transfer reverts, EVM atomicity rolls back the mints
         // The alternative (transfer-first) is functionally identical but changes error
         // semantics — a rejected tribute would revert before any minting state is written.
-        address[] memory recipients = new address[](1);
-        uint256[] memory amounts = new uint256[](1);
-        recipients[0] = msg.sender;
-
-        if (sharesToMint > 0) {
-            amounts[0] = sharesToMint;
-            daoShip.mintShares(recipients, amounts);
-        }
-
-        if (lootToMint > 0) {
-            amounts[0] = lootToMint;
-            daoShip.mintLoot(recipients, amounts);
-        }
+        _mintSharesAndLoot(msg.sender, sharesToMint, lootToMint);
 
         // Forward tribute to DAO treasury
         (bool success, ) = daoShip.avatar().call{value: cost}("");
@@ -221,61 +199,5 @@ contract OnboarderNavigator is ReentrancyGuard, INavigator {
         }
 
         emit Onboard(address(daoShip), msg.sender, cost, sharesToMint, lootToMint);
-    }
-
-    /**
-     * @notice Onboard without allowlist proof (for open onboarding)
-     */
-    function onboard() external payable {
-        onboard(new bytes32[](0));
-    }
-
-    /**
-     * @notice Pause onboarding
-     * @dev Gap 10: Requires GOVERNOR navigator permission (navigators[msg.sender] & 4 != 0)
-     *      OR the DAO avatar. This ensures both pause and unpause go through the same
-     *      authorization path — preventing any large shareholder from unilaterally pausing
-     *      while governance is required to unpause (asymmetric griefing vector).
-     *      GOVERNOR navigators are explicitly authorized actors (set via governance proposal).
-     */
-    function pause() external {
-        if ((daoShip.navigators(msg.sender) & 4) == 0 && msg.sender != daoShip.avatar()) revert NotAuthorized();
-        paused = true;
-        emit Paused(msg.sender);
-    }
-
-    /**
-     * @notice Unpause onboarding
-     * @dev Requires GOVERNOR navigator permission or DAO avatar (same as pause).
-     */
-    function unpause() external {
-        if ((daoShip.navigators(msg.sender) & 4) == 0 && msg.sender != daoShip.avatar()) revert NotAuthorized();
-        paused = false;
-        emit Unpaused(msg.sender);
-    }
-
-    /**
-     * @notice Withdraw any ETH stuck in this contract (e.g., failed refunds).
-     * @dev Only callable by the DAOShip avatar (governance).
-     *      In fixed-price mode, a refund can fail if the contributor is a contract that
-     *      rejects ETH. Shares are already minted and tribute is already in the vault,
-     *      but the remainder accumulates here. Governance can recover it to any address.
-     * @param to Recipient of the recovered ETH
-     * @param amount Amount of ETH to withdraw (in wei)
-     */
-    function withdrawStuckETH(address payable to, uint256 amount) external {
-        if (msg.sender != daoShip.avatar()) revert NotAuthorized();
-        (bool success, ) = to.call{value: amount}("");
-        require(success, "OnboarderNavigator: withdrawal failed");
-    }
-
-    /**
-     * @notice Accept plain ETH transfers and trigger onboarding.
-     * @dev Delegates to onboard() with an empty proof so that plain ETH sends
-     *      (e.g., from a wallet or contract that uses transfer/send/call without data)
-     *      participate in onboarding the same as explicit onboard() calls.
-     */
-    receive() external payable {
-        onboard(new bytes32[](0));
     }
 }

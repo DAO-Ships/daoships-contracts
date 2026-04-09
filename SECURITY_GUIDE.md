@@ -190,15 +190,15 @@ There is no time-lock between a GOVERNOR navigator calling `setGovernanceConfig`
 
 The contract enforces a `MIN_VOTING_PERIOD` of 60 seconds. This is designed for automated agent DAOs. Human-facing DAOs must set higher values:
 
-| Parameter | Agent DAO | Human DAO (Recommended) | Notes |
-|-----------|-----------|------------------------|-------|
-| `votingPeriod` | 60–300s | ≥ 86400s (24h) | Time for all members to see and vote |
-| `gracePeriod` | 60s | ≥ 86400s (24h) | Time to ragequit before execution |
-| `quorumPercent` | 100 (1%) | ≥ 2000 (20%) | Minimum participation to pass |
-| `sponsorThreshold` | 1 | ≥ 1 share unit | Non-zero prevents any address from sponsoring |
-| `minRetentionPercent` | 0 | ≥ 5000 (50%) | Ragequit-as-veto protection |
-| `proposalOffering` | 0 | > 0 (token-denominated) | Anti-spam cost for non-sponsor proposals |
-| `defaultExpiryWindow` | 600s (10m) | ≥ 604800s (7 days) | Processing window after grace before auto-expiry |
+| Parameter | Agent DAO | Human DAO (Recommended) | Enforced Bounds | Notes |
+|-----------|-----------|------------------------|-----------------|-------|
+| `votingPeriod` | 60–300s | ≥ 86400s (24h) | MIN: 60s, MAX: 31,536,000s (1 year) | Time for all members to see and vote |
+| `gracePeriod` | 60s | ≥ 86400s (24h) | MIN: 0, MAX: 31,536,000s (1 year) | Time to ragequit before execution |
+| `quorumPercent` | 100 (1%) | ≥ 2000 (20%) | 0–10000 (basis points) | Minimum participation to pass |
+| `sponsorThreshold` | 1 | ≥ 1 share unit | 0–totalSupply (capped at runtime) | Non-zero prevents any address from sponsoring |
+| `minRetentionPercent` | 0 | ≥ 5000 (50%) | 0–10000 (basis points) | Ragequit-as-veto protection |
+| `proposalOffering` | 0 | > 0 (token-denominated) | No upper bound | Anti-spam cost for non-sponsor proposals |
+| `defaultExpiryWindow` | 600s (10m) | ≥ 604800s (7 days) | No bounds | Processing window after grace before auto-expiry |
 
 ### Why gracePeriod matters
 
@@ -312,6 +312,18 @@ This is a deliberate improvement over upstream. It means members always have at 
 
 If `address(0)` is not in guild tokens, QUAI in the vault is not accessible via ragequit. Members can still exit with their share of ERC20 guild tokens.
 
+### Ragequit balance snapshot (audit fix H-1)
+
+`ragequit()` snapshots all guild token balances from the vault BEFORE executing any transfers. Fair share amounts are calculated from these pre-transfer balances. The transfer loop then uses the pre-computed amounts.
+
+This prevents a callback-based attack where the ragequit recipient's `receive()` function deposits tokens into the vault mid-loop, inflating balances for guild tokens processed later in the array. Without the snapshot, a reentrant callback (e.g., via a navigator's `onboard()`) could inflate the vault's balance of a later-processed guild token, causing the ragequitter to withdraw more than their proportional share.
+
+The snapshot also means that ETH sent to the vault during the transfer callback does not inflate fair shares for subsequently processed ERC20 tokens, and vice versa.
+
+### Token singleton bricking (audit fix H-2)
+
+SharesERC20 and LootERC20 singleton implementations call `renounceOwnership()` in their constructors. This makes the singleton permanently inert — no one can call `mint()`, `burn()`, `pause()`, or `unpause()` on the implementation contract directly. EIP-1167 clones have zeroed storage (`owner == address(0)`), so `initialize()` remains callable on clones. This is a defense-in-depth measure that prevents any future misuse of the singleton implementation.
+
 ---
 
 ## 6. Deployment Checklist
@@ -363,4 +375,113 @@ Ragequit, direct navigator calls (MANAGER mint/burn, GOVERNOR setGovernanceConfi
 
 ---
 
-*This guide covers findings from the daoships-contracts security audit dated 2026-03-18. Updated 2026-03-19 to reflect QuaiVault v2 integration: H-2 (atomic module enablement) and C-2 (MultiSendCallOnly + DelegateCall whitelist) are now fully fixed.*
+## 7. Accepted Audit Findings (Documented, Not Fixed)
+
+The following findings from the SSSES audit v4 are accepted as design decisions. Each is documented here so operators and integrators understand the behavior and its implications.
+
+### M-2: Navigator permission locks allow revocation but not granting
+
+`lockAdmin()`, `lockManager()`, and `lockGovernor()` prevent GRANTING the locked permission to new navigators. However, governance proposals can still REVOKE a locked permission from existing navigators (by setting their permission to 0).
+
+This is intentional. After locking a permission tier, governance retains the ability to remove a compromised navigator. Without this, a malicious navigator with a locked role would be irrevocable — a worse outcome than the current behavior.
+
+**What operators should know:** Locking a role means "no new navigators with this role." It does NOT mean "existing navigators with this role are permanent." A governance proposal can always strip any navigator's permissions, even after the corresponding lock is engaged. Plan role assignment accordingly.
+
+### M-3: Extreme governance parameters can soft-brick the DAO
+
+`_validateGovernanceConfig` enforces minimum and maximum bounds on `votingPeriod`, `gracePeriod`, `quorumPercent`, and `minRetentionPercent`, but allows edge values:
+
+- `quorumPercent = 10000` (100%) — every single share must vote YES
+- `minRetentionPercent = 10000` (100%) — no ragequit possible
+- `sponsorThreshold` close to `totalSupply` — only a near-100% holder can sponsor
+
+These combinations are technically valid but effectively disable governance. Recovery requires a GOVERNOR navigator calling `setGovernanceConfig` directly.
+
+**Recommended safe ranges:**
+
+| Parameter | Minimum | Maximum | Risk if exceeded |
+|-----------|---------|---------|-----------------|
+| `quorumPercent` | 0 | 6600 (66%) | > 66% makes passing very difficult |
+| `minRetentionPercent` | 0 | 9000 (90%) | > 90% makes ragequit nearly impossible |
+| `sponsorThreshold` | 0 | 10% of totalSupply | Higher = fewer members can sponsor |
+
+### L-2 (v5): Proposal ID space exhaustion when `sponsorThreshold=0` and `proposalOffering=0`
+
+`proposalCount` is `uint32`, capping at 4,294,967,295 proposals. With `sponsorThreshold=0`, any address with zero shares can self-sponsor proposals. With `proposalOffering=0`, submission is free. Together, an attacker can submit unlimited free proposals to exhaust the ID space.
+
+Once `proposalCount` reaches `type(uint32).max`, `submitProposal` reverts with `ProposalLimitReached()` permanently — no new proposals can ever be created.
+
+**Why this is accepted:** On Quai Network, each proposal submission costs gas (~100-150K gas). Exhausting 4.3 billion IDs would cost trillions of transactions — economically impractical even with very low gas fees. The attack also provides no financial benefit to the attacker.
+
+**What operators should know:** Set at least one of `proposalOffering > 0` or `sponsorThreshold > 0` to prevent zero-cost proposal spam. Both being zero is technically valid but removes all anti-spam protection.
+
+### M-4: Governance config changes retroactively affect in-flight proposals
+
+Governance parameters are read from live storage at evaluation time, not snapshotted at sponsor time. This means changes to `quorumPercent`, `votingPeriod`, `gracePeriod`, `defaultExpiryWindow`, and `minRetentionPercent` retroactively affect all in-flight proposals. This matches upstream MolochV3 (Baal) behavior.
+
+**Affected parameters and their impact on in-flight proposals:**
+
+| Parameter | Where read | Impact |
+|-----------|-----------|--------|
+| `quorumPercent` | `_didProposalPass()` at processing time | Raising quorum can retroactively defeat a passing proposal; lowering it can pass a failing one |
+| `defaultExpiryWindow` | `state()` on every query | Changing the window can make a Ready proposal suddenly expire, or an expired one become processable |
+| `votingPeriod` / `gracePeriod` | `state()` auto-expiry fallback (`2 * (votingPeriod + gracePeriod)`) | Same auto-expiry impact as `defaultExpiryWindow` |
+| `minRetentionPercent` | `processProposal()` retention check | Raising retention can defeat a proposal that would have survived the old threshold |
+
+**Why this is accepted:** This is the GOVERNOR trust model — GOVERNOR navigators (and governance proposals that change config) are explicitly trusted to manage parameters. Snapshotting each parameter at sponsor time would deviate from MolochV3 and add significant storage overhead (multiple new fields per Proposal struct). The scenario requires a GOVERNOR config change during an active vote, which is an explicit trust delegation.
+
+**What operators should know:** If a governance proposal changes `quorumPercent` or `minRetentionPercent`, all currently in-flight proposals may see different pass/fail outcomes than members expected when they voted. For DAOs that change parameters frequently, use explicit `expiration` timestamps on proposals to avoid the auto-expiry variant of this issue.
+
+### V7-1: Retention high water mark not updated during grace period — MANAGER mint dilutes ragequit-as-veto
+
+The `maxTotalSharesAndLootAtVote` high water mark is only updated during voting (in `_submitVote`). During the grace period — the exact window when members exercise ragequit-as-veto — the high water mark is frozen. A MANAGER navigator minting shares during grace inflates the current total supply without proportionally raising the retention threshold, weakening the veto.
+
+**Example:** Voting peak supply is 1000. `minRetentionPercent = 9000` (90%). Retention threshold = 900. During grace, a MANAGER mints 200 shares to allies. 250 members ragequit. Supply drops to 950. At processing: `950 >= 900` — proposal passes. Without the grace-period mint, supply would be 750, and `750 < 900` — proposal defeated by veto.
+
+**Why this is accepted:** This matches upstream MolochV3 (Baal) behavior exactly. Both codebases update the high water mark only during voting. The MANAGER is a trusted role — the entire navigator permission model assumes MANAGER navigators act in the DAO's interest. The retention mechanism protects against organic member dissatisfaction (mass ragequit), not against MANAGER collusion. A compromised MANAGER can already mint unlimited supply, making this the lesser concern.
+
+**What operators should know:** The ragequit-as-veto mechanism is effective against governance disputes where members disagree with a proposal. It is NOT effective against a compromised MANAGER who can mint shares during the grace period. If MANAGER trust is a concern, lock the MANAGER role after initial navigator setup and rely solely on governance proposals for minting.
+
+### H-2 (v5): Ragequit callback into MANAGER functions — accepted, not exploitable
+
+During ragequit's transfer loop, a callback from the `to` address can invoke `mintShares`, `mintLoot`, `burnShares`, `burnLoot`, or `convertSharesToLoot` via a MANAGER navigator. These functions intentionally do NOT have `nonReentrant` because they must be callable from governance proposals via `executeAsGovernance` (which runs inside `processProposal`, which holds the reentrancy lock).
+
+This is accepted because:
+- Ragequit fair shares are pre-computed from balance snapshots — callbacks cannot change withdrawal amounts
+- New minting via callbacks requires paying full tribute price through a navigator
+- The result is economically equivalent to ragequitting then re-onboarding in separate transactions
+- `totalShares`/`totalLoot` cache remains arithmetically correct (burns decrement, reentrant mints increment)
+
+### M-2 (v5): Delegation fluctuation can enable grief cancellation of proposals
+
+The `cancelProposal` H-4 fix allows anyone to cancel a sponsored proposal if the sponsor's current voting power drops below the effective sponsor threshold. This uses live `getPriorVotes(sponsor, block.timestamp - 1)`, not a snapshot from sponsor time.
+
+This means routine delegation activity during a voting period can inadvertently make proposals cancellable. If Alice sponsors a proposal with exactly `sponsorThreshold` delegated votes, and a delegator independently redelegates 1 share away during the voting period, anyone can cancel the proposal.
+
+**Why this is accepted:** The H-4 fix serves a critical purpose — it prevents a sponsor whose delegation was deliberately withdrawn from keeping an illegitimate proposal alive. Snapshotting the sponsor's votes at sponsor time would re-introduce the original vulnerability (a delegator revokes delegation but the proposal remains alive with phantom voting power).
+
+**Practical mitigation:** The sponsor threshold is typically low relative to total supply (e.g., 1-100 shares). A sponsor falling below threshold requires losing nearly ALL their delegated voting power, which is a significant event, not routine churn. For DAOs with active delegation markets, setting `sponsorThreshold` well below the typical delegate's balance provides a safety margin.
+
+**What operators should know:** Proposals are safest when the sponsor holds shares directly (not delegated) or holds significantly more than `sponsorThreshold`. If a sponsor relies on delegated votes near the threshold boundary, the proposal is vulnerable to cancellation via delegation withdrawal — whether malicious or accidental.
+
+### M-6: Navigator deployment has no on-chain MANAGER permission check
+
+Navigator constructors cannot verify they will have MANAGER permission on the target DAOShip. This is a chicken-and-egg problem: the navigator's address is unknown until after deployment, and `setNavigators` requires the address.
+
+A navigator deployed without being registered will permanently fail on all `onboard()` calls since config is immutable.
+
+**Deployment order:** (1) Deploy navigator, (2) Submit governance proposal calling `setNavigators([navigatorAddr], [2])`, (3) Process proposal. The navigator is non-functional between steps 1 and 3. Frontends should verify `daoShip.navigators(navigatorAddr) & 2 != 0` before displaying a navigator as active.
+
+### M-8: SharesERC20 and LootERC20 are governance tokens, not DeFi-compatible
+
+These tokens deviate from standard ERC-20 behavior in ways that may break DeFi integrations:
+
+1. **Pause blocks transfers but not mint/burn** — AMM pools freeze (no swaps), but the DAO can still mint and ragequit can still burn. A paused token in a Uniswap pool would trap liquidity.
+2. **Auto-delegation on first receipt** — any contract receiving tokens for the first time (vaults, lending pools, DEX routers) gets self-delegated, accumulating voting power in contracts that cannot exercise it.
+3. **MINT_CAP on shares is `type(uint216).max`** — lower than the standard `type(uint256).max`, which could confuse protocols that assume uint256 range.
+
+These are deliberate design choices for governance tokens. If DeFi integration is desired, use a wrapper ERC-20 that proxies transfers without the governance-specific behavior.
+
+---
+
+*This guide covers findings from the daoships-contracts SSSES audits v1-v8. v5: C-1 (OnboarderNavigator receive() nonReentrant) fixed, M-1 (OOG grief protection) fixed. v6: state() expired unsponsored fix, defeated proposals require empty data, withdrawStuckTokens nonReentrant. v7: L-items (memory caching, struct packing, statusFlags bitfield, dead code removal, BaseNavigator/DAOShipPermit extraction, bounds checks). v8: delegate(address(0)) blocked (InvalidDelegatee), bitwise parentheses. Accepted: quorum snapshot (MolochV3), lock revocation (governance supreme), ragequit callback (non-exploitable), delegation grief (H-4 tradeoff), retention high water mark (MolochV3).*

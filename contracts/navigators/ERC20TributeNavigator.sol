@@ -1,13 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.22;
 
-import "../core/DAOShip.sol";
-import "../interfaces/INavigator.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "./BaseNavigator.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
-import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 /**
  * @title ERC20TributeNavigator
@@ -28,17 +25,11 @@ import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
  *
  * mintCap is also in raw wei (e.g., mintCap=100e18 caps at 100 whole shares+loot).
  */
-contract ERC20TributeNavigator is ReentrancyGuard, INavigator {
+contract ERC20TributeNavigator is BaseNavigator {
     using SafeERC20 for IERC20;
 
     /// @notice Navigator type identifier for indexer discovery
     string public constant navigatorType = "ERC20TributeNavigator";
-
-    /// @notice Address that deployed this navigator
-    address public immutable deployer;
-
-    /// @notice Associated DAOShip DAO
-    DAOShip public immutable daoShip;
 
     /// @notice ERC20 token accepted as tribute
     IERC20 public immutable tributeToken;
@@ -49,45 +40,7 @@ contract ERC20TributeNavigator is ReentrancyGuard, INavigator {
     /// @notice Tribute amount per loot (in tribute token decimals). 0 = no loot minting.
     uint256 public immutable pricePerLoot;
 
-    /// @notice Expiration timestamp (0 = no expiration)
-    uint256 public immutable expiry;
-
-    /// @notice Maximum total shares+loot this navigator can mint (0 = unlimited)
-    uint256 public immutable mintCap;
-
-    /// @notice Maximum shares+loot any single address can receive (0 = unlimited)
-    uint256 public immutable perAddressCap;
-
-    /// @notice Merkle root for allowlist (bytes32(0) = open to anyone)
-    bytes32 public immutable allowlistRoot;
-
-    /// @notice Total shares+loot minted so far
-    uint256 public totalMinted;
-
-    /// @notice Per-address minted tracking
-    mapping(address => uint256) public mintedTo;
-
-    /// @notice Whether the navigator is paused
-    bool public paused;
-
-    event Onboard(
-        address indexed daoShipAddress,
-        address indexed contributor,
-        uint256 tributeAmount,
-        uint256 shares,
-        uint256 loot
-    );
-    event Paused(address indexed caller);
-    event Unpaused(address indexed caller);
-
     error InsufficientAmount();
-    error Expired();
-    error MintCapExceeded();
-    error PerAddressCapExceeded();
-    error NotAllowlisted();
-    error IsPaused();
-    error NotAuthorized();
-    error InvalidConfig();
 
     /**
      * @notice Deploy ERC20TributeNavigator
@@ -113,20 +66,13 @@ contract ERC20TributeNavigator is ReentrancyGuard, INavigator {
         bytes32 _allowlistRoot,
         string memory _name,
         string memory _description
-    ) {
-        if (_daoShip == address(0)) revert InvalidConfig();
+    ) BaseNavigator(_daoShip, _expiry, _mintCap, _perAddressCap, _allowlistRoot) {
         if (_tributeToken == address(0)) revert InvalidConfig();
         if (_pricePerShare == 0 && _pricePerLoot == 0) revert InvalidConfig();
 
-        deployer = msg.sender;
-        daoShip = DAOShip(payable(_daoShip));
         tributeToken = IERC20(_tributeToken);
         pricePerShare = _pricePerShare;
         pricePerLoot = _pricePerLoot;
-        expiry = _expiry;
-        mintCap = _mintCap;
-        perAddressCap = _perAddressCap;
-        allowlistRoot = _allowlistRoot;
 
         emit NavigatorDeployed(_daoShip, msg.sender, navigatorType, _name, _description);
     }
@@ -200,27 +146,6 @@ contract ERC20TributeNavigator is ReentrancyGuard, INavigator {
     }
 
     /**
-     * @notice Pause onboarding
-     * @dev Requires GOVERNOR navigator permission (navigators[msg.sender] & 4 != 0)
-     *      OR the DAO avatar. Symmetric with unpause to prevent unilateral griefing.
-     */
-    function pause() external {
-        if ((daoShip.navigators(msg.sender) & 4) == 0 && msg.sender != daoShip.avatar()) revert NotAuthorized();
-        paused = true;
-        emit Paused(msg.sender);
-    }
-
-    /**
-     * @notice Unpause onboarding
-     * @dev Requires GOVERNOR navigator permission or DAO avatar (same as pause).
-     */
-    function unpause() external {
-        if ((daoShip.navigators(msg.sender) & 4) == 0 && msg.sender != daoShip.avatar()) revert NotAuthorized();
-        paused = false;
-        emit Unpaused(msg.sender);
-    }
-
-    /**
      * @notice Recover ERC20 tokens accidentally sent to this contract
      * @dev Only callable by the DAO avatar (governance). Tribute tokens are sent directly
      *      to the vault via safeTransferFrom — they should never accumulate here. This is
@@ -229,14 +154,14 @@ contract ERC20TributeNavigator is ReentrancyGuard, INavigator {
      * @param to Recipient of the recovered tokens
      * @param amount Amount to recover
      */
-    function withdrawStuckTokens(IERC20 token, address to, uint256 amount) external {
+    function withdrawStuckTokens(IERC20 token, address to, uint256 amount) external nonReentrant {
         if (msg.sender != daoShip.avatar()) revert NotAuthorized();
         SafeERC20.safeTransfer(token, to, amount);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════════════
     // Internal
-    // ═══════════════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════════════════════════
 
     /**
      * @notice Calculate the total tribute cost for a given share and loot mint
@@ -274,22 +199,14 @@ contract ERC20TributeNavigator is ReentrancyGuard, INavigator {
         if (expiry != 0 && block.timestamp > expiry) revert Expired();
         if (sharesToMint == 0 && lootToMint == 0) revert InsufficientAmount();
 
-        // Allowlist check
-        if (allowlistRoot != bytes32(0)) {
-            if (!MerkleProof.verify(proof, allowlistRoot, keccak256(bytes.concat(keccak256(abi.encode(msg.sender)))))) {
-                revert NotAllowlisted();
-            }
-        }
+        _checkAllowlist(proof);
 
         // Calculate tribute cost
         uint256 tributeAmount = _calculateTribute(sharesToMint, lootToMint);
 
         // Mint cap checks (cap is also in raw wei)
         uint256 toMint = sharesToMint + lootToMint;
-        if (mintCap > 0 && totalMinted + toMint > mintCap) revert MintCapExceeded();
-        if (perAddressCap > 0 && mintedTo[msg.sender] + toMint > perAddressCap) revert PerAddressCapExceeded();
-        totalMinted += toMint;
-        mintedTo[msg.sender] += toMint;
+        _checkAndUpdateCaps(toMint);
 
         // Transfer tribute directly to DAO treasury (avatar/vault)
         // Verify actual received amount to reject fee-on-transfer tokens
@@ -300,19 +217,7 @@ contract ERC20TributeNavigator is ReentrancyGuard, INavigator {
         if (actualReceived < tributeAmount) revert InsufficientAmount();
 
         // Mint shares and loot (params are already raw wei amounts)
-        address[] memory recipients = new address[](1);
-        uint256[] memory amounts = new uint256[](1);
-        recipients[0] = msg.sender;
-
-        if (sharesToMint > 0) {
-            amounts[0] = sharesToMint;
-            daoShip.mintShares(recipients, amounts);
-        }
-
-        if (lootToMint > 0) {
-            amounts[0] = lootToMint;
-            daoShip.mintLoot(recipients, amounts);
-        }
+        _mintSharesAndLoot(msg.sender, sharesToMint, lootToMint);
 
         emit Onboard(address(daoShip), msg.sender, tributeAmount, sharesToMint, lootToMint);
     }

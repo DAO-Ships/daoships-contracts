@@ -7,7 +7,7 @@
 
 DAO Ships is a DAO framework and launchpad for Quai Network, inspired by HausDAO Baal (MolochV3). It is not a fork with patches. Every contract has been rewritten from scratch against Solidity 0.8.22 and OpenZeppelin v5.0.0, the entire Gnosis Safe / Zodiac / OpenGSN dependency tree has been removed, and a substantial layer of governance safety hardening has been added that upstream does not have.
 
-The result is a smaller, more gas-efficient, and more auditable codebase. DAO Ships' DAOShip.sol compiles to 21,729 bytes (88.4% of the 24KB limit). The test suite includes 506 tests (unit + local E2E) and 24 on-chain E2E phases. Key security improvements include scoping `executeAsGovernance` to self-calls only, flash-loan-resistant sponsorship, deadlock prevention via `_effectiveSponsorThreshold` and `defaultExpiryWindow`, parallel proposal execution (removing upstream's sequential queue), and a DelegateCall whitelist on the vault.
+The result is a smaller, more gas-efficient, and more auditable codebase. DAO Ships' DAOShip.sol compiles to 21,729 bytes (88.4% of the 24KB limit). The test suite includes 381 tests (unit + local E2E) and 28 on-chain E2E tests across 18 lifecycle phases. Key security improvements include scoping `executeAsGovernance` to self-calls only, flash-loan-resistant sponsorship, deadlock prevention via `_effectiveSponsorThreshold` and `defaultExpiryWindow`, parallel proposal execution (removing upstream's sequential queue), and a DelegateCall whitelist on the vault.
 
 The tradeoff is explicit: DAO Ships drops upstream's token upgradeability, EIP-712 signature voting/delegation, OpenGSN meta-transactions, and Gnosis Safe ecosystem compatibility. These are appropriate tradeoffs for Quai Network, where gas fees are low and the deployment target is Quai Vault rather than Gnosis Safe.
 
@@ -179,6 +179,7 @@ Cancelling during Submitted state prevents a proposal from being sponsored again
 | balanceOf call | `staticcall` without success check | `staticcall` with `require(success)` |
 | Retention check | Not in ragequit (only in processProposal) | Explicit retention check in ragequit |
 | Recipient validation | None | `require(to != address(0))` |
+| Balance snapshot | Inline (query + transfer per token) | Pre-snapshot all balances, then transfer — prevents callback inflation |
 
 Guild token registration prevents ragequitting with arbitrary tokens (which could drain the vault via malicious token contracts). `MAX_GUILD_TOKENS = 20` caps the registry to prevent out-of-gas ragequit transactions — each token costs a `balanceOf` + `execTransactionFromModule` call. The vault can hold unlimited tokens; guild tokens are only the ragequit-eligible subset. The retention check in ragequit prevents members from collectively exiting below the minimum. The tradeoff: upstream needs no governance proposal to add ragequit tokens.
 
@@ -219,6 +220,7 @@ Bitwise checks are more gas-efficient. Permission validation prevents storing me
 | Aspect | Upstream | DAO Ships |
 |--------|----------|-----|
 | Proxy pattern | ERC1967 (UUPS upgradeable) | EIP-1167 minimal clones (non-upgradeable) |
+| Singleton safety | `_disableInitializers()` | `renounceOwnership()` in constructor — singleton permanently inert |
 | Shares base | `DAOShipVotes + ERC20SnapshotUpgradeable + OwnableUpgradeable + PausableUpgradeable + UUPSUpgradeable` | `DAOShipVotes + ERC20Pausable + Ownable + Nonces + IERC20Permit` |
 | Loot base | `ERC20SnapshotUpgradeable + ERC20PermitUpgradeable + PausableUpgradeable + OwnableUpgradeable + UUPSUpgradeable` | `ERC20 + ERC20Pausable + Ownable + Nonces + IERC20Permit` |
 | Snapshots | `ERC20SnapshotUpgradeable` (both tokens) | Removed |
@@ -448,6 +450,8 @@ Upstream's TributeMinion (176 lines) is a proposal-based tribute system with ERC
 25. **DAOShipUtils library** for `encodeMultisend`
 26. **EIP-2612 Permit on LootERC20** (clone-safe, matching upstream feature parity)
 27. **Mint caps** on both tokens (Shares: `type(uint216).max`, Loot: `type(uint256).max / 2`)
+28. **Ragequit balance snapshot** — all guild token balances captured before transfers, preventing callback-based inflation
+29. **Token singleton bricking** — `renounceOwnership()` in constructors makes implementations permanently inert
 
 ---
 

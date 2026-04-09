@@ -2,6 +2,25 @@ import { ethers } from "hardhat";
 import { time } from "@nomicfoundation/hardhat-network-helpers";
 
 /**
+ * Create EIP-1167 minimal proxy clone bytecode for a given implementation address
+ */
+function cloneBytecodeFor(implAddress: string): string {
+  const padded = implAddress.slice(2).toLowerCase().padStart(40, "0");
+  return `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${padded}5af43d82803e903d91602b57fd5bf3`;
+}
+
+/**
+ * Deploy an EIP-1167 clone of a given implementation and return the clone contract
+ */
+async function deployClone(impl: any, factory: any, signer: any): Promise<any> {
+  const bytecode = cloneBytecodeFor(await impl.getAddress());
+  const cloneFactory = new ethers.ContractFactory([], bytecode, signer);
+  const cloneRaw = await cloneFactory.deploy();
+  await cloneRaw.waitForDeployment();
+  return factory.attach(await cloneRaw.getAddress());
+}
+
+/**
  * Simplified test fixtures that deploy directly without launcher
  * Avoids clone ownership issues for testing
  */
@@ -23,14 +42,16 @@ export interface DAOShipFixture {
 export async function deployDAOShipFixture(): Promise<DAOShipFixture> {
   const [deployer, alice, bob, carol] = await ethers.getSigners();
 
-  // Deploy tokens directly
+  // Deploy token singletons (bricked by constructor) and create clones
   const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-  const shares = await SharesERC20.deploy();
-  await shares.waitForDeployment();
+  const sharesImpl = await SharesERC20.deploy();
+  await sharesImpl.waitForDeployment();
+  const shares = await deployClone(sharesImpl, SharesERC20, deployer);
 
   const LootERC20 = await ethers.getContractFactory("LootERC20");
-  const loot = await LootERC20.deploy();
-  await loot.waitForDeployment();
+  const lootImpl = await LootERC20.deploy();
+  await lootImpl.waitForDeployment();
+  const loot = await deployClone(lootImpl, LootERC20, deployer);
 
   // Deploy DAOShip singleton (constructor sets avatar=0xdead to block singleton init)
   const DAOShipFactory = await ethers.getContractFactory("DAOShip");
@@ -38,12 +59,7 @@ export async function deployDAOShipFixture(): Promise<DAOShipFixture> {
   await daoShipImpl.waitForDeployment();
 
   // Create EIP-1167 minimal proxy clone (clone has zeroed storage, passes setUp guard)
-  const implAddr = (await daoShipImpl.getAddress()).slice(2).toLowerCase().padStart(40, "0");
-  const cloneBytecode = `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${implAddr}5af43d82803e903d91602b57fd5bf3`;
-  const cloneFactory = new ethers.ContractFactory([], cloneBytecode, deployer);
-  const cloneDeployment = await cloneFactory.deploy();
-  await cloneDeployment.waitForDeployment();
-  const daoShip = DAOShipFactory.attach(await cloneDeployment.getAddress()) as any;
+  const daoShip = await deployClone(daoShipImpl, DAOShipFactory, deployer);
 
   // Deploy MockAvatar (proper IAvatar implementation for testing)
   const MockAvatar = await ethers.getContractFactory("MockAvatar");
@@ -65,9 +81,9 @@ export async function deployDAOShipFixture(): Promise<DAOShipFixture> {
   const multisendCallOnly = await MultiSendCallOnly.deploy();
   await multisendCallOnly.waitForDeployment();
 
-  // Transfer ownership of tokens to DAOShip
-  await shares.transferOwnership(await daoShip.getAddress());
-  await loot.transferOwnership(await daoShip.getAddress());
+  // Initialize token clones with DAOShip as owner
+  await shares.initialize(await daoShip.getAddress(), "DAOShip Shares", "SHARES");
+  await loot.initialize(await daoShip.getAddress(), "DAOShip Loot", "LOOT");
 
   // Governance config
   const votingPeriod = 7 * 24 * 60 * 60; // 7 days
@@ -155,18 +171,15 @@ export async function deployNavigatorFixture(): Promise<NavigatorFixture> {
   const [deployer, alice, bob, carol] = await ethers.getSigners();
 
   const SharesERC20 = await ethers.getContractFactory("SharesERC20");
-  const shares = await SharesERC20.deploy();
+  const sharesImpl = await SharesERC20.deploy();
+  const shares = await deployClone(sharesImpl, SharesERC20, deployer);
   const LootERC20 = await ethers.getContractFactory("LootERC20");
-  const loot = await LootERC20.deploy();
+  const lootImpl = await LootERC20.deploy();
+  const loot = await deployClone(lootImpl, LootERC20, deployer);
   const DAOShipFactory2 = await ethers.getContractFactory("DAOShip");
-  const baalImpl2 = await DAOShipFactory2.deploy();
-  await baalImpl2.waitForDeployment();
-  const implAddr2 = (await baalImpl2.getAddress()).slice(2).toLowerCase().padStart(40, "0");
-  const cloneBytecode2 = `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${implAddr2}5af43d82803e903d91602b57fd5bf3`;
-  const cloneFactory2 = new ethers.ContractFactory([], cloneBytecode2, deployer);
-  const cloneDeployment2 = await cloneFactory2.deploy();
-  await cloneDeployment2.waitForDeployment();
-  const daoShip = DAOShipFactory2.attach(await cloneDeployment2.getAddress()) as any;
+  const daoShipImpl2 = await DAOShipFactory2.deploy();
+  await daoShipImpl2.waitForDeployment();
+  const daoShip = await deployClone(daoShipImpl2, DAOShipFactory2, deployer);
   const MockAvatar = await ethers.getContractFactory("MockAvatar");
   const avatar = await MockAvatar.deploy();
   await avatar.enableModule(await daoShip.getAddress());
@@ -176,8 +189,8 @@ export async function deployNavigatorFixture(): Promise<NavigatorFixture> {
   const multisend = await MultiSend.deploy();
   const MultiSendCallOnly = await ethers.getContractFactory("MultiSendCallOnly");
   const multisendCallOnly = await MultiSendCallOnly.deploy();
-  await shares.transferOwnership(await daoShip.getAddress());
-  await loot.transferOwnership(await daoShip.getAddress());
+  await shares.initialize(await daoShip.getAddress(), "DAOShip Shares", "SHARES");
+  await loot.initialize(await daoShip.getAddress(), "DAOShip Loot", "LOOT");
 
   // Deploy OnboarderNavigator (multiplier mode: 2x shares, no loot, 0.01 min, no expiry, no cap, open)
   const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator");

@@ -2094,6 +2094,59 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log(`\n✅ EIP-2612 Permit on LootERC20 working correctly on-chain\n`);
   });
 
+  it("Should process a defeated proposal with empty data (ProcessProposal with passed=false)", async function () {
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("PHASE 18: Defeated Proposal Processing");
+    console.log("═══════════════════════════════════════════════════════════\n");
+
+    const daoShipAddress = await daoShip.getAddress();
+
+    // Submit a proposal that will fail quorum (only alice votes, not enough for 20%)
+    const proposalData = encodeMultiSend([
+      { operation: 0, to: daoShipAddress, value: 0n, data: "0x" }
+    ]);
+
+    const details = JSON.stringify({ title: "Defeated proposal test", type: "custom" });
+
+    await provider.getBlockNumber(Shard.Cyprus1);
+    const submitTx = await daoShip.connect(deployer).submitProposal(proposalData, 0, details);
+    console.log(`   Submit TX: ${submitTx.hash}`);
+    const submitReceipt = await submitTx.wait();
+    console.log(`   ✅ Submitted in block ${submitReceipt.blockNumber}`);
+
+    const proposalId = await daoShip.proposalCount();
+    console.log(`   Proposal ID: ${proposalId}\n`);
+
+    // Wait for full voting + grace period without meeting quorum
+    const vp = await daoShip.votingPeriod();
+    const gp = await daoShip.gracePeriod();
+    const totalWait = Number(vp) + Number(gp) + 30;
+    console.log(`   Waiting ${totalWait}s for voting + grace period...`);
+    await new Promise((resolve) => setTimeout(resolve, totalWait * 1000));
+
+    // Check state is Defeated (auto-defeat: no votes means yesBalance=0, noBalance=0 → 0 > 0 = false)
+    const stateBeforeProcess = await daoShip.state(proposalId);
+    console.log(`   State before processing: ${stateBeforeProcess} (7 = Defeated)`);
+    expect(stateBeforeProcess).to.equal(7n);
+
+    // Process defeated proposal with empty data (required since v6 fix)
+    console.log("   Processing defeated proposal with empty data...");
+    await provider.getBlockNumber(Shard.Cyprus1);
+    const processTx = await daoShip.connect(deployer).processProposal(proposalId, "0x");
+    const processReceipt = await processTx.wait();
+    console.log(`   ✅ Processed in block ${processReceipt.blockNumber}\n`);
+
+    // Verify status
+    const proposalStatus = await daoShip.getProposalStatus(proposalId);
+    console.log(`   Status: [cancelled=${proposalStatus[0]}, processed=${proposalStatus[1]}, passed=${proposalStatus[2]}, actionFailed=${proposalStatus[3]}]`);
+    expect(proposalStatus[0]).to.be.false;  // NOT cancelled
+    expect(proposalStatus[1]).to.be.true;   // processed
+    expect(proposalStatus[2]).to.be.false;  // NOT passed (defeated)
+    expect(proposalStatus[3]).to.be.false;  // NOT actionFailed
+
+    console.log("\n✅ Defeated proposal processed correctly with empty data\n");
+  });
+
   it("Complete - All events triggered", async function () {
     console.log("╔══════════════════════════════════════════════════════════════╗");
     console.log("║  🎉 COMPLETE DAO LIFECYCLE + ALL EVENTS TEST PASSED! 🎉     ║");
