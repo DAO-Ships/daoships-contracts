@@ -110,12 +110,13 @@ All emitted by individual DAOShip clone contracts.
 event SetupComplete(
     bool lootPaused,
     bool sharesPaused,
-    uint32 gracePeriod,
     uint32 votingPeriod,
+    uint32 gracePeriod,
     uint256 proposalOffering,
     uint256 quorumPercent,
     uint256 sponsorThreshold,
     uint256 minRetentionPercent,
+    uint32 defaultExpiryWindow,
     string name,
     string symbol,
     string lootName,
@@ -128,6 +129,7 @@ event SetupComplete(
 
 **Handler action:**
 - Update DAO record with all governance parameters
+- Write `default_expiry_window` from the event (0 = DAO uses 2*(voting+grace) fallback at runtime)
 - Store shares token name/symbol (`name`, `symbol`) and loot token name/symbol (`lootName`, `lootSymbol`) from the event
 - Register initial guild tokens
 - Store initial `totalShares` and `totalLoot`
@@ -747,7 +749,7 @@ const HANDLERS: Record<string, { name: string; handler: EventHandler }> = {
     { name: "LaunchDAOShipAndVault", handler: handleLaunchDAOShipAndVault },
 
   // DAOShip governance events
-  [id("SetupComplete(bool,bool,uint32,uint32,uint256,uint256,uint256,uint256,string,string,string,string,address[],uint256,uint256)")]:
+  [id("SetupComplete(bool,bool,uint32,uint32,uint256,uint256,uint256,uint256,uint32,string,string,string,string,address[],uint256,uint256)")]:
     { name: "SetupComplete", handler: handleSetupComplete },
   [id("SubmitProposal(uint256,bytes32,address,uint256,bytes,uint256,bool,uint256,string,uint256)")]:
     { name: "SubmitProposal", handler: handleSubmitProposal },

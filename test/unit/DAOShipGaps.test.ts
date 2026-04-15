@@ -2156,3 +2156,187 @@ describe("High water mark retention", function () {
     // and the retention check used it (not the sponsor-time snapshot alone).
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SetupComplete event schema — defaultExpiryWindow round-trip + topic0 canary
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("SetupComplete event schema", function () {
+  // Builds an uninitialised DAOShip clone + ready-to-use setUp params so tests
+  // can assert against the `setUp` transaction directly.
+  async function buildClonePending(defaultExpiryWindow: number) {
+    const [deployer, alice] = await ethers.getSigners();
+
+    const SharesERC20 = await ethers.getContractFactory("SharesERC20");
+    const sharesImpl = await SharesERC20.deploy();
+    const LootERC20 = await ethers.getContractFactory("LootERC20");
+    const lootImpl = await LootERC20.deploy();
+
+    function makeCloneBytecode(addr: string) {
+      const padded = addr.slice(2).toLowerCase().padStart(40, "0");
+      return `0x3d602d80600a3d3981f3363d3d373d3d3d363d73${padded}5af43d82803e903d91602b57fd5bf3`;
+    }
+
+    const sharesCloneRaw = await new ethers.ContractFactory([], makeCloneBytecode(await sharesImpl.getAddress()), deployer).deploy();
+    const shares = SharesERC20.attach(await sharesCloneRaw.getAddress()) as any;
+
+    const lootCloneRaw = await new ethers.ContractFactory([], makeCloneBytecode(await lootImpl.getAddress()), deployer).deploy();
+    const loot = LootERC20.attach(await lootCloneRaw.getAddress()) as any;
+
+    const DAOShipFactory = await ethers.getContractFactory("DAOShip");
+    const daoShipImpl = await DAOShipFactory.deploy();
+    await daoShipImpl.waitForDeployment();
+    const daoShipCloneRaw = await new ethers.ContractFactory([], makeCloneBytecode(await daoShipImpl.getAddress()), deployer).deploy();
+    const daoShip = DAOShipFactory.attach(await daoShipCloneRaw.getAddress()) as any;
+
+    const MockAvatar = await ethers.getContractFactory("MockAvatar");
+    const avatar = await MockAvatar.deploy();
+    await avatar.enableModule(await daoShip.getAddress());
+
+    const MultiSend = await ethers.getContractFactory("MultiSend");
+    const multisend = await MultiSend.deploy();
+
+    await shares.initialize(await daoShip.getAddress(), "Test Shares", "TSH");
+    await loot.initialize(await daoShip.getAddress(), "Test Loot", "TLT");
+
+    const votingPeriod = 3600;
+    const gracePeriod = 60;
+    const sponsorThreshold = ethers.parseEther("1");
+    const minRetentionPercent = 6600;
+
+    const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
+      ["uint32", "uint32", "uint256", "uint256", "uint256", "uint256", "uint32"],
+      [votingPeriod, gracePeriod, 0, 0, sponsorThreshold, minRetentionPercent, defaultExpiryWindow]
+    );
+
+    const initShares = [ethers.parseEther("100"), ethers.parseEther("50")];
+    const initLoot = [0n, 0n];
+
+    const initParams = ethers.AbiCoder.defaultAbiCoder().encode(
+      ["address", "address", "address", "address", "bytes",
+       "address[]", "uint256[]", "address[]", "uint256[]", "uint256[]", "address[]",
+       "bool", "bool"],
+      [
+        await loot.getAddress(), await shares.getAddress(), await avatar.getAddress(),
+        await multisend.getAddress(), governanceConfig,
+        [], [],
+        [deployer.address, alice.address], initShares, initLoot,
+        [],
+        false, false
+      ]
+    );
+
+    return { daoShip, initParams, votingPeriod, gracePeriod, sponsorThreshold, minRetentionPercent };
+  }
+
+  it("Should emit SetupComplete with a non-zero defaultExpiryWindow that round-trips the stored value", async function () {
+    const expiry = 604800; // 1 week
+    const { daoShip, initParams, votingPeriod, gracePeriod, sponsorThreshold, minRetentionPercent } = await buildClonePending(expiry);
+
+    await expect(daoShip.setUp(initParams))
+      .to.emit(daoShip, "SetupComplete")
+      .withArgs(
+        false, false,
+        votingPeriod, gracePeriod,
+        0, 0,
+        sponsorThreshold,
+        minRetentionPercent,
+        expiry,
+        "Test Shares", "TSH",
+        "Test Loot", "TLT",
+        [],
+        ethers.parseEther("150"),
+        0n
+      );
+
+    expect(await daoShip.defaultExpiryWindow()).to.equal(expiry);
+  });
+
+  it("Should emit SetupComplete with defaultExpiryWindow=0 without reverting", async function () {
+    const { daoShip, initParams, votingPeriod, gracePeriod, sponsorThreshold, minRetentionPercent } = await buildClonePending(0);
+
+    await expect(daoShip.setUp(initParams))
+      .to.emit(daoShip, "SetupComplete")
+      .withArgs(
+        false, false,
+        votingPeriod, gracePeriod,
+        0, 0,
+        sponsorThreshold,
+        minRetentionPercent,
+        0,
+        "Test Shares", "TSH",
+        "Test Loot", "TLT",
+        [],
+        ethers.parseEther("150"),
+        0n
+      );
+
+    // Runtime fallback (2*(voting+grace)) is applied at proposal time, not in the event.
+    expect(await daoShip.defaultExpiryWindow()).to.equal(0);
+  });
+
+  it("Should emit SetupComplete with defaultExpiryWindow=uint32 max", async function () {
+    const maxU32 = 2 ** 32 - 1;
+    const { daoShip, initParams, votingPeriod, gracePeriod, sponsorThreshold, minRetentionPercent } = await buildClonePending(maxU32);
+
+    await expect(daoShip.setUp(initParams))
+      .to.emit(daoShip, "SetupComplete")
+      .withArgs(
+        false, false,
+        votingPeriod, gracePeriod,
+        0, 0,
+        sponsorThreshold,
+        minRetentionPercent,
+        maxU32,
+        "Test Shares", "TSH",
+        "Test Loot", "TLT",
+        [],
+        ethers.parseEther("150"),
+        0n
+      );
+
+    expect(await daoShip.defaultExpiryWindow()).to.equal(maxU32);
+  });
+
+  it("Should emit SetupComplete under the new topic0 hash and not the pre-fix topic", async function () {
+    const { daoShip, initParams } = await buildClonePending(42);
+    const tx = await daoShip.setUp(initParams);
+    const receipt = await tx.wait();
+
+    const NEW_SIG = "SetupComplete(bool,bool,uint32,uint32,uint256,uint256,uint256,uint256,uint32,string,string,string,string,address[],uint256,uint256)";
+    const OLD_SIG = "SetupComplete(bool,bool,uint32,uint32,uint256,uint256,uint256,uint256,string,string,string,string,address[],uint256,uint256)";
+    const newTopic0 = ethers.id(NEW_SIG);
+    const oldTopic0 = ethers.id(OLD_SIG);
+    expect(newTopic0).to.not.equal(oldTopic0);
+
+    const daoShipAddr = (await daoShip.getAddress()).toLowerCase();
+    const matching = receipt.logs.filter((l: any) =>
+      l.address.toLowerCase() === daoShipAddr && l.topics[0] === newTopic0
+    );
+    expect(matching.length, "expected exactly one SetupComplete log under new topic0").to.equal(1);
+
+    const none = receipt.logs.filter((l: any) =>
+      l.address.toLowerCase() === daoShipAddr && l.topics[0] === oldTopic0
+    );
+    expect(none.length, "no log should match the old topic0").to.equal(0);
+  });
+
+  it("Should not decode under the old ABI string (topic0 mismatch)", async function () {
+    const { daoShip, initParams } = await buildClonePending(123);
+    const tx = await daoShip.setUp(initParams);
+    const receipt = await tx.wait();
+
+    const NEW_SIG = "SetupComplete(bool,bool,uint32,uint32,uint256,uint256,uint256,uint256,uint32,string,string,string,string,address[],uint256,uint256)";
+    const newTopic0 = ethers.id(NEW_SIG);
+    const log = receipt.logs.find((l: any) => l.topics[0] === newTopic0);
+    expect(log, "new-schema log must exist in receipt").to.not.equal(undefined);
+
+    const oldIface = new ethers.Interface([
+      "event SetupComplete(bool lootPaused, bool sharesPaused, uint32 gracePeriod, uint32 votingPeriod, uint256 proposalOffering, uint256 quorumPercent, uint256 sponsorThreshold, uint256 minRetentionPercent, string name, string symbol, string lootName, string lootSymbol, address[] guildTokens, uint256 totalShares, uint256 totalLoot)"
+    ]);
+
+    // ethers v6 parseLog returns null when topic0 doesn't match any known event.
+    const parsed = oldIface.parseLog({ topics: [...log.topics], data: log.data });
+    expect(parsed).to.equal(null);
+  });
+});

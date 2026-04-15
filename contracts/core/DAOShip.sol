@@ -242,14 +242,17 @@ contract DAOShip is ReentrancyGuard {
      * @notice Emitted when DAOShip is initialized
      * @param lootPaused Whether loot token is paused
      * @param sharesPaused Whether shares token is paused
-     * @param gracePeriod Grace period duration
      * @param votingPeriod Voting period duration
+     * @param gracePeriod Grace period duration
      * @param proposalOffering Native tokens (QUAI on Quai Network) required to submit proposal
      * @param quorumPercent Quorum percentage (basis points)
      * @param sponsorThreshold Minimum shares to sponsor
      * @param minRetentionPercent Minimum retention after ragequit (basis points)
+     * @param defaultExpiryWindow Default auto-expiry window (0 = use 2*(voting+grace) fallback)
      * @param name Shares token name
      * @param symbol Shares token symbol
+     * @param lootName Loot token name
+     * @param lootSymbol Loot token symbol
      * @param guildTokens Initial ragequittable tokens
      * @param totalShares Initial total shares
      * @param totalLoot Initial total loot
@@ -257,12 +260,13 @@ contract DAOShip is ReentrancyGuard {
     event SetupComplete(
         bool lootPaused,
         bool sharesPaused,
-        uint32 gracePeriod,
         uint32 votingPeriod,
+        uint32 gracePeriod,
         uint256 proposalOffering,
         uint256 quorumPercent,
         uint256 sponsorThreshold,
         uint256 minRetentionPercent,
+        uint32 defaultExpiryWindow,
         string name,
         string symbol,
         string lootName,
@@ -661,12 +665,13 @@ contract DAOShip is ReentrancyGuard {
         emit SetupComplete(
             lootToken.paused(),
             sharesToken.paused(),
-            gracePeriod,
             votingPeriod,
+            gracePeriod,
             proposalOffering,
             quorumPercent,
             sponsorThreshold,
             minRetentionPercent,
+            defaultExpiryWindow,
             sharesToken.name(),
             sharesToken.symbol(),
             lootToken.name(),
