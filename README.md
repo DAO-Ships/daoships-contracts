@@ -221,12 +221,9 @@ daoships-contracts/
 │   │       └── OnChainDAOLifecycle.test.ts
 │   └── fixtures.ts
 ├── scripts/
+│   ├── deploy-all.ts               # Canonical deployment: poster + singletons + factories
 │   ├── deploy/
-│   │   ├── 001_deploy_poster.ts
-│   │   ├── 002_deploy_singletons.ts
-│   │   ├── 003_deploy_factories.ts
-│   │   └── 004_deploy_navigators.ts
-│   ├── deploy-all.ts
+│   │   └── 004_deploy_navigators.ts  # Per-DAO navigator deployment (OnboarderNavigator, ERC20TributeNavigator)
 │   ├── create-dao.ts
 │   ├── update-env.ts
 │   └── replace-navigator.ts       # Governance helper: replace navigator via proposal

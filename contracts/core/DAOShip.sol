@@ -1207,6 +1207,16 @@ contract DAOShip is ReentrancyGuard {
 
     /**
      * @notice Mint shares to addresses
+     * @dev Array length is intentionally uncapped. Gas cost is bounded by the caller's gas budget
+     *      and the EVM block gas limit. Partial batches cannot corrupt state — if the loop runs out
+     *      of gas mid-execution, EVM atomicity reverts the entire transaction, including the
+     *      `totalShares += total` cache update on line 1222. The `totalShares` cache stays in sync
+     *      with `sharesToken.totalSupply()` under all outcomes.
+     *
+     *      For very large batches via governance proposals, split into multiple sub-calls within a
+     *      single MultiSend batch if a single call would approach block gas limits. A failed batch
+     *      consumes one governance proposal slot (actionFailed=true), so prefer conservative sizes
+     *      when block headroom is uncertain.
      * @param to Addresses to receive shares
      * @param amount Amounts to mint
      */
@@ -1226,6 +1236,9 @@ contract DAOShip is ReentrancyGuard {
 
     /**
      * @notice Mint loot to addresses
+     * @dev Array length is intentionally uncapped. See `mintShares` for the full rationale —
+     *      same gas-bounding and atomicity guarantees apply. The `totalLoot` cache is updated
+     *      after the loop and reverts atomically on OOG, staying in sync with `lootToken.totalSupply()`.
      * @param to Addresses to receive loot
      * @param amount Amounts to mint
      */
@@ -1245,6 +1258,10 @@ contract DAOShip is ReentrancyGuard {
 
     /**
      * @notice Burn shares from addresses
+     * @dev Array length is intentionally uncapped. See `mintShares` for the full rationale —
+     *      same gas-bounding and atomicity guarantees apply. Additionally, the sponsor-threshold
+     *      guard (line 1261) is computed over the full batch before any burns, so a partial-batch
+     *      OOG cannot bypass the threshold check.
      * @param from Addresses to burn shares from
      * @param amount Amounts to burn
      */
@@ -1270,6 +1287,9 @@ contract DAOShip is ReentrancyGuard {
 
     /**
      * @notice Burn loot from addresses
+     * @dev Array length is intentionally uncapped. See `mintShares` for the full rationale —
+     *      same gas-bounding and atomicity guarantees apply. The `totalLoot` cache is updated
+     *      after the loop and reverts atomically on OOG.
      * @param from Addresses to burn loot from
      * @param amount Amounts to burn
      */
