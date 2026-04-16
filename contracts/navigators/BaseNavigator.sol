@@ -21,6 +21,13 @@ import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 abstract contract BaseNavigator is ReentrancyGuard, INavigator {
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // Constants
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// @dev Matches DAOShip.GOVERNOR — local constant avoids an external call
+    uint256 private constant _GOVERNOR = 4;
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // Immutables
     // ═══════════════════════════════════════════════════════════════════════════
 
@@ -119,7 +126,7 @@ abstract contract BaseNavigator is ReentrancyGuard, INavigator {
      *      OR the DAO avatar. Symmetric with unpause to prevent unilateral griefing.
      */
     function pause() external {
-        if ((daoShip.navigators(msg.sender) & 4) == 0 && msg.sender != daoShip.avatar()) revert NotAuthorized();
+        if ((daoShip.navigators(msg.sender) & _GOVERNOR) == 0 && msg.sender != daoShip.avatar()) revert NotAuthorized();
         paused = true;
         emit Paused(msg.sender);
     }
@@ -129,7 +136,7 @@ abstract contract BaseNavigator is ReentrancyGuard, INavigator {
      * @dev Requires GOVERNOR navigator permission or DAO avatar (same as pause).
      */
     function unpause() external {
-        if ((daoShip.navigators(msg.sender) & 4) == 0 && msg.sender != daoShip.avatar()) revert NotAuthorized();
+        if ((daoShip.navigators(msg.sender) & _GOVERNOR) == 0 && msg.sender != daoShip.avatar()) revert NotAuthorized();
         paused = false;
         emit Unpaused(msg.sender);
     }
