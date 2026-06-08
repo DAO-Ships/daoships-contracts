@@ -402,7 +402,7 @@ event DelegateVotesChanged(address delegate, uint256 previousBalance, uint256 ne
 
 ### 4. Navigator Events
 
-Emitted by navigator contracts (OnboarderNavigator, ERC20TributeNavigator). All navigators implement `INavigator` and emit `NavigatorDeployed` at construction time.
+Emitted by navigator contracts (OnboarderNavigator, ERC20TributeNavigator, NFTGatedNavigator, SignalNavigator). All navigators implement `INavigator` and emit `NavigatorDeployed` at construction time. Note that not every navigator is an *onboarding* navigator — `SignalNavigator` runs non-binding polls and emits no `Onboard` event (see below).
 
 #### `NavigatorDeployed` (All navigators implementing INavigator)
 
@@ -423,7 +423,7 @@ event NavigatorDeployed(
 - Store `deployer` in `ds_navigators.deployer` (add column if not present)
 - Store `name` and `description` in `ds_navigators.name` / `ds_navigators.description`
 - Store `navigatorType` in `ds_navigators.navigator_type`
-- `daoShip` identifies which DAO this navigator belongs to
+- **Bind `ds_navigators.dao_id` from the indexed `daoShip` here — do not wait for `NavigatorSet`.** This is the canonical DAO association for *every* INavigator navigator; `NavigatorSet` only ever updates `permission` / `is_active` afterward (and never arrives at all for read-only navigators). Caveat: this binding is *self-asserted* and unauthenticated — `NavigatorDeployed` is permissionless, so for read-only navigators it must be treated as untrusted until sanctioned (see [Protecting DAOs from spam read-only navigators](#protecting-daos-from-spam-read-only-navigators)).
 - `name` and `description` may be empty strings (they are optional at deploy time)
 - This event is emitted exactly once per navigator (in the constructor), so there is no deduplication concern
 
@@ -516,6 +516,99 @@ event Unpaused(address indexed caller);
 - Update navigator status (paused/active)
 - `caller` is the address that triggered the pause/unpause
 
+#### `PollCreated` / `Voted` / `PollCancelled` (SignalNavigator)
+
+`navigatorType = "SignalNavigator"`. Non-binding, share-weighted governance polls ("temperature checks"). **This is a read-only navigator: it holds NO permission, never calls a mutating function on DAOShip, and is therefore NEVER registered via `setNavigators()` — so no `NavigatorSet` event ever fires for it.** It is discovered exclusively from its `NavigatorDeployed` event (which carries the indexed `daoShip` association). See [Permissionless (read-only) navigators](#permissionless-read-only-navigators) under Navigator Discovery — the standard "register for monitoring on `NavigatorSet` with permission > 0" rule does **not** apply here, and an indexer that only monitors navigators seen via `NavigatorSet` will index zero polls.
+
+It emits no `Onboard` event (it never mints shares or loot). Its three events stand alone:
+
+```solidity
+event PollCreated(
+    uint256 indexed pollId,
+    address indexed creator,
+    string question,            // IPFS hash or short text
+    uint8 optionCount,          // 2..10
+    uint64 snapshotTimestamp,   // votingStarts - 1; voting power measured here
+    uint64 votingStarts,
+    uint64 votingEnds
+);
+event Voted(uint256 indexed pollId, address indexed voter, uint8 indexed option, uint256 weight);
+event PollCancelled(uint256 indexed pollId, address indexed caller);
+```
+
+**Topic0:**
+- `keccak256("PollCreated(uint256,address,string,uint8,uint64,uint64,uint64)")`
+- `keccak256("Voted(uint256,address,uint8,uint256)")`
+- `keccak256("PollCancelled(uint256,address)")`
+
+**`pollId` is per-navigator, not global.** Ids start at 0 and increment within each SignalNavigator contract (`pollCount`). Key all poll rows by `(navigator_address, poll_id)`, and resolve the DAO from the navigator's `NavigatorDeployed.daoShip` (the poll events themselves do not carry the DAO address).
+
+**Handler action — `PollCreated`:**
+- Insert a poll row keyed by `(navigator_address, poll_id)`.
+- `question` is an IPFS CID or short text (same convention as proposal / Poster content) — resolve off-chain if it is a CID.
+- **Status is time-derived, not event-driven.** There is no "poll opened" or "poll ended" event. Compute status from the timestamps exactly as the contract's `pollStatus()` does: `Pending` while `now < votingStarts`, `Active` while `votingStarts <= now < votingEnds`, `Ended` once `now >= votingEnds`, `Cancelled` if the cancelled flag is set (terminal, overrides the others).
+- `snapshotTimestamp = votingStarts - 1` is the timepoint at which every voter's weight is measured (delegation-aware `getPriorVotes`). Store it if you reconstruct or verify tallies.
+
+**Handler action — `Voted`:**
+- Insert a vote row keyed by `(navigator_address, poll_id, voter)`. One vote per address per poll is enforced on-chain — a second row for the same key is a reorg/replay; dedupe on it.
+- `weight` is the voter's **share** voting power at the snapshot. **Loot does not count — shares only.** Increment the poll's per-option tally by `weight`; never derive weight from current balances (it is frozen at `votingStarts - 1`).
+- `option` is the chosen index, `0..optionCount-1`.
+
+**Handler action — `PollCancelled`:**
+- Mark the poll cancelled (terminal). `caller` is the creator (allowed only before voting opens) or the DAO avatar (allowed any time before the poll ends). Ignore any later events for a cancelled poll.
+
+**Views for backfill / reconciliation** (all on the navigator contract):
+- `polls(pollId)` — scalar fields only (creator, question, optionCount, snapshotTimestamp, votingStarts, votingEnds, cancelled); the nested tallies and voted-flags are omitted from the public getter.
+- `getResults(pollId) -> uint256[]` — full tally indexed by option. `getOptionVotes(pollId, option)`, `hasVoted(pollId, voter)`, `pollStatus(pollId)`, `pollCount`.
+- Config immutables: `minSharesToCreatePoll`, `minDuration`, `maxDuration`, `maxStartDelay`.
+
+**Frontend display — trust is mandatory, not optional.** Polls inherit the trust of their navigator. Every poll query MUST join `ds_navigators.trust_status` (keyed by `navigator_address`) and the frontend MUST act on it — a poll from a `self_asserted` navigator looks identical to a sanctioned one on-chain, so the only thing protecting a DAO's poll feed from injected spam is this label:
+- **`sanctioned`** — the DAO endorsed this navigator via a vault `daoships.dao.navigators` proposal. Show in the default feed.
+- **`self_asserted`** — deployed against the DAO but not (yet) endorsed. Hide behind a "show unverified polls" toggle, or render with a clear "unverified" badge. Never show in the default feed.
+- **`unsanctioned`** — endorsement was revoked. Treat like `self_asserted` (or hide entirely).
+- **`fabricated`** — weights failed reconciliation against the DAO's checkpoints. Never display.
+
+Default the UI to the safe view (`sanctioned` only). Surface poll **status** with the same time-derived logic the contract uses (`pollStatus()`): `Pending` / `Active` / `Ended` / `Cancelled` — do not rely on an event to tell you a poll opened or closed. To let a DAO endorse a navigator from the UI, submit the governance proposal in [POSTER.md → Pattern 4](POSTER.md#pattern-4-sanction-a-read-only-navigator-governance-proposal).
+
+This navigator has **no** `Paused`/`Unpaused` (no pause mechanism). Suggested storage:
+
+```sql
+-- SignalNavigator polls (non-binding temperature checks)
+CREATE TABLE ds_signal_polls (
+    id VARCHAR(128) PRIMARY KEY,           -- {navigator_address}-{poll_id}
+    dao_id VARCHAR(42) REFERENCES ds_daos(id),
+    navigator_address VARCHAR(42) NOT NULL,
+    poll_id NUMERIC(78,0) NOT NULL,        -- per-navigator, starts at 0
+    creator VARCHAR(42) NOT NULL,
+    question TEXT,                          -- IPFS CID or short text
+    option_count SMALLINT NOT NULL,         -- 2..10
+    snapshot_timestamp BIGINT NOT NULL,     -- votingStarts - 1 (weight timepoint)
+    voting_starts BIGINT NOT NULL,
+    voting_ends BIGINT NOT NULL,
+    cancelled BOOLEAN DEFAULT FALSE,
+    tally NUMERIC(78,0)[] DEFAULT '{}',     -- per-option running totals (index = option)
+    tx_hash VARCHAR(66),
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(navigator_address, poll_id)
+);
+
+-- SignalNavigator votes (one row per address per poll)
+CREATE TABLE ds_signal_votes (
+    id VARCHAR(170) PRIMARY KEY,           -- {navigator_address}-{poll_id}-{voter}
+    poll_pk VARCHAR(128) REFERENCES ds_signal_polls(id),
+    dao_id VARCHAR(42) REFERENCES ds_daos(id),
+    navigator_address VARCHAR(42) NOT NULL,
+    poll_id NUMERIC(78,0) NOT NULL,
+    voter VARCHAR(42) NOT NULL,
+    option SMALLINT NOT NULL,               -- 0..option_count-1
+    weight NUMERIC(78,0) NOT NULL,          -- snapshot share weight (loot excluded)
+    tx_hash VARCHAR(66),
+    created_at TIMESTAMPTZ,
+    UNIQUE(navigator_address, poll_id, voter)
+);
+```
+
 ---
 
 ### 5. Poster Events (EIP-3722)
@@ -536,7 +629,7 @@ event NewPost(
 - Parse `content` as JSON if it starts with `{`
 - See [docs/POSTER.md](POSTER.md) for the complete domain schema and trust model
 
-**Tag-based routing (6 tags total — see [POSTER.md](POSTER.md) for full schemas):**
+**Tag-based routing (7 tags total — see [POSTER.md](POSTER.md) for full schemas):**
 
 | Tag | Action | Trust Check |
 |-----|--------|-------------|
@@ -546,6 +639,7 @@ event NewPost(
 | `daoships.member.profile` | Create/update member metadata | `msg.sender` has shares > 0 |
 | `daoships.proposal.vote.reason` | Associate with vote record (one per voter per proposal) | `msg.sender` matches voter in SubmitVote |
 | `daoships.navigator.allowlist` | Store Merkle tree for navigator allowlist proof generation | `msg.sender` has shares > 0 (MEMBER trust) |
+| `daoships.dao.navigators` | Set sanctioned read-only navigators (updates `ds_navigators.trust_status`) — see [Protecting DAOs from spam read-only navigators](#protecting-daos-from-spam-read-only-navigators) | `msg.sender` == vault address |
 
 **IMPORTANT:** Never index a post based on tag alone. Always verify `msg.sender` against the trust model before writing to the database. Discard posts where content exceeds 16 KB.
 
@@ -676,8 +770,10 @@ CREATE TABLE ds_navigators (
     navigator_address VARCHAR(42) NOT NULL,
     deployer VARCHAR(42),                  -- From INavigator.deployer() or NavigatorDeployed event (null for legacy navigators)
     permission INTEGER NOT NULL,           -- Bitmask: 1=ADMIN, 2=MANAGER, 4=GOVERNOR (valid: 0-7)
-    is_active BOOLEAN DEFAULT TRUE,        -- FALSE when permission set to 0
-    navigator_type VARCHAR(50),            -- 'OnboarderNavigator', 'ERC20TributeNavigator', 'unknown'
+    permission_ever_granted BOOLEAN DEFAULT FALSE, -- TRUE once any NavigatorSet(>0) seen; separates revoked (TRUE) from read-only/never-registered (FALSE)
+    trust_status VARCHAR(16) DEFAULT 'self_asserted', -- read-only DAO-binding trust: 'sanctioned'|'self_asserted'|'unsanctioned'|'fabricated' (permissioned navs are vouched by NavigatorSet → 'sanctioned')
+    is_active BOOLEAN DEFAULT TRUE,        -- functional now? read-only stays TRUE at permission 0; FALSE on revoke. NOT a proxy for "has permission"
+    navigator_type VARCHAR(50),            -- 'OnboarderNavigator', 'ERC20TributeNavigator', 'NFTGatedNavigator', 'SignalNavigator', 'unknown'
     paused BOOLEAN DEFAULT FALSE,
 
     -- Metadata (from NavigatorDeployed event; legacy navigators: navigatorType() RPC only)
@@ -841,6 +937,14 @@ const HANDLERS: Record<string, { name: string; handler: EventHandler }> = {
   [id("NFTClaimed(address,address,uint256,uint256,uint256)")]:
     { name: "NFTClaimed", handler: handleNFTClaimed },
 
+  // SignalNavigator events (read-only polls; navigator discovered via NavigatorDeployed, never NavigatorSet)
+  [id("PollCreated(uint256,address,string,uint8,uint64,uint64,uint64)")]:
+    { name: "PollCreated", handler: handlePollCreated },
+  [id("Voted(uint256,address,uint8,uint256)")]:
+    { name: "Voted", handler: handleVoted },
+  [id("PollCancelled(uint256,address)")]:
+    { name: "PollCancelled", handler: handlePollCancelled },
+
   // Poster events
   [id("NewPost(address,string,string)")]:
     { name: "NewPost", handler: handleNewPost },
@@ -965,6 +1069,95 @@ When `NavigatorSet` fires with `permission > 0`, the indexer should:
 
 When `NavigatorSet` fires with `permission == 0`, the navigator is revoked. Mark it as inactive. Continue monitoring for historical data if desired, but no new onboarding events will be emitted (the navigator's functions check permissions on every call).
 
+#### Permissionless (read-only) navigators
+
+Some navigators hold **no permission and never register via `setNavigators()`**, so they emit **no `NavigatorSet` event at all** — `SignalNavigator` (non-binding polls) is the first of these. They read voting power from DAOShip but never mutate it, so they need no permission grant to function.
+
+For these, the **`NavigatorDeployed` event is the only discovery signal — and it is sufficient.** It carries the indexed `daoShip` (DAO association), `deployer`, `navigatorType`, `name`, and `description`. Handle it as follows:
+
+1. On `NavigatorDeployed`, create the `ds_navigators` row immediately, using the event's `daoShip` for the DAO association. Do **not** wait for a `NavigatorSet` that will never arrive.
+2. Route by `navigatorType`: if it is a known permissionless type (`"SignalNavigator"`), start fetching that navigator's own events right away (`PollCreated` / `Voted` / `PollCancelled`).
+3. Set `permission = 0` and `is_active = TRUE`. Here `permission == 0` means "read-only," **not** "revoked" — distinguish it from a `NavigatorSet(addr, 0)` revocation, which sets `is_active = FALSE`.
+
+**Pitfall:** an indexer that registers navigator addresses for event monitoring *only* inside `handleNavigatorSet` will index zero polls — a SignalNavigator address never passes through that handler. Drive monitoring off `NavigatorDeployed` with type-based routing, not off `NavigatorSet` alone.
+
+#### Navigator lifecycle & pruning
+
+`permission = 0` is overloaded — three distinct lifecycle states collapse onto it. Pruning must key off *which* state, not off the value `0` (and not off `dao_id IS NULL`, which no longer occurs once `dao_id` is bound from `NavigatorDeployed`).
+
+The discriminator is **`permission_ever_granted`**: set it TRUE the first time a `NavigatorSet(addr, > 0)` from a known DAOShip is processed for the address. With that one bit, plus `navigator_type` and whether `daoShip` resolves to a known DAO:
+
+| State | `permission_ever_granted` | `NavigatorSet` history | `is_active` | Prune? |
+|-------|---------------------------|------------------------|-------------|--------|
+| Read-only (e.g. SignalNavigator) | false | none, ever | true | **Never** |
+| Never-registered, known DAO | false | none, ever | false | Never (keep inert) |
+| Never-registered, unknown DAO | false | none, ever | false | Yes — at chain head only |
+| Active permissioned | true | last set `> 0` | true | Never |
+| Revoked | true | `> 0` then `0` | false | **Never** (keep history) |
+
+**Never-registered, non-read-only.** A permissioned navigator (Onboarder / ERC20Tribute / NFTGated) can be deployed and bound to a DAO via `NavigatorDeployed` yet never granted permission — the `setNavigators()` proposal never passed, or is still in flight. With `permission = 0` it is inert: its mutating calls into DAOShip revert, so it emits no `Onboard` / `NFTClaimed` and produces no data. "Abandoned" and "governance pending" are indistinguishable on-chain, and a proposal can land arbitrarily long after deploy — so do **not** run a deploy-age timer. Two outcomes:
+- `daoShip` resolves to a known DAO → keep as `is_active = false` ("deployed, unregistered"). It's cheap, harmless, and **self-heals**: if the proposal later passes, `handleNavigatorSet`'s RPC fallback (`navigatorType()` / `deployer()`) re-hydrates it from scratch. Pruning gains almost nothing and risks deleting a pending navigator.
+- `daoShip` does NOT resolve to a known DAO → genuine orphan (spam against a junk address, or a deploy that raced ahead of DAO discovery). Prune it.
+
+**Revoked (lost permission).** A `NavigatorSet(addr, > 0)` later followed by `NavigatorSet(addr, 0)`. Never prune — it was DAO-authorized, almost certainly minted or onboarded, and the row is the only durable record. Revocation is a status change: `is_active = false`, `permission = 0`, history intact. `permission_ever_granted = true` is exactly what separates this from a born-at-0 read-only navigator (both sit at `permission = 0`).
+
+**Prune predicate** — the only rows safe to delete:
+
+```
+permission_ever_granted = false
+  AND navigator_type NOT IN (<read-only types>)   -- never reap read-only
+  AND daoShip does NOT resolve to a known ds_daos row
+  AND no events have ever been indexed from the address
+  AND the indexer is caught up to chain head        -- never prune mid-backfill
+```
+
+The chain-head guard is critical: a navigator whose DAO simply hasn't been ingested yet is indistinguishable from an orphan until you reach head.
+
+#### Protecting DAOs from spam read-only navigators
+
+Read-only navigators are the one case where the DAO association is **self-asserted, not DAO-authorized**. `NavigatorDeployed` is permissionless: anyone can deploy a contract whose constructor emits `NavigatorDeployed(victimDAO, attacker, "SignalNavigator", …)`, and the unfiltered topic0 scan picks it up. There is no `NavigatorSet` from the DAO to vouch for it — that absence is the whole point of a read-only navigator. So a naive indexer that binds `dao_id` from the event and materializes every `PollCreated` / `Voted` lets anyone inject polls into any DAO's feed.
+
+Two spam classes, defended differently:
+
+- **Real-but-unsanctioned** — genuine SignalNavigator bytecode, really pointed at the DAO (it *does* call `daoShip.getPriorVotes`), so the weights are real, but the DAO never endorsed this instance. Recomputing weights does **not** catch it (they reconcile). Caught only by sanctioning.
+- **Fabricated** — a mimic that emits the same event signatures without reading the DAO. `Voted.weight` is invented; `Voted` can name addresses that never voted. Caught only by recomputing weights against the DAO's own checkpoints.
+
+This is a **trust/curation problem, not garbage collection** — you cannot delete your way out of permissionless self-association. Defense is layered, cheap → strong; record the verdict in `ds_navigators.trust_status`:
+
+1. **Resolution gate.** Ignore any read-only `NavigatorDeployed` whose `daoShip` does not resolve to a known DAO. Stops spam pointed at non-DAO addresses; does nothing against spam aimed at a real DAO.
+2. **Identity probe** (one cached RPC pair). Call `navigator.daoShip()` and `navigator.navigatorType()`; both must agree with the event. Defeats lazy mimics that fake the topic but not the getters. A sophisticated mimic implements both — so this is necessary, not sufficient.
+3. **Sanctioning — the authoritative "DAO authorized it" signal.** The DAO's vault publishes which read-only navigators it blesses via a vault-signed Poster post under the **`daoships.dao.navigators`** tag (full schema in [POSTER.md](POSTER.md#dao-sanctioned-navigators-daoshipsdaonavigators); handler spec below). Gated on `msg.sender == vault`, so it is unforgeable and grants no on-chain permission. Matched → `trust_status = 'sanctioned'`. This needs no on-chain registration, preserving the navigator's permissionlessness while giving the DAO control. Unmatched read-only navigators default to `'self_asserted'`.
+4. **Weight reconciliation — the authoritative "numbers aren't fabricated" signal.** For a self-asserted navigator, recompute `getPriorVotes(voter, snapshotTimestamp)` on the claimed DAO for the first poll's votes (or a sample). All match → weights are real (raise confidence); any mismatch → `trust_status = 'fabricated'`, suppress the navigator. The DAO's checkpoint system is ground truth; this is the only check that definitively unmasks fabricated navigators. It is archive-RPC-heavy, so run it lazily / sampled, never on the hot path.
+5. **Presentation policy.** The feed surfaces `'sanctioned'` polls by default; `'self_asserted'` behind a "show unverified polls" toggle or a warning badge; `'fabricated'` / `'unsanctioned'` hidden. The indexer's job is to label correctly; the frontend's job is to default to the safe view.
+
+**Bounding volumetric spam.** You still *see* every event (the scan is unfiltered), but you need not *materialize* every one. Defer writing `ds_signal_polls` / `ds_signal_votes` for navigators that are neither `sanctioned` nor weight-reconciled — or require at least one reconciled vote before materializing a navigator's poll history — so a flood of fabricated navigators against one DAO cannot bloat the poll tables.
+
+##### Handler action — `daoships.dao.navigators` (sanction list)
+
+This post is the only thing that flips a read-only navigator to `'sanctioned'`. It is a `NewPost` like any other — route it through `handleNewPost` by tag.
+
+1. **Trust gate (mandatory).** Verify `msg.sender == ds_daos.avatar` for the `daoAddress` in the content. If it does not match the vault, **discard** — a non-vault `daoships.dao.navigators` post is spam (same rule as `dao.profile`). Validate content ≤ 16 KB, JSON parses, addresses are valid hex.
+2. **Full-set, last-write-wins.** The `navigators` array is the DAO's *complete* sanctioned set as of this post — not a delta. Dedup key: vault + tag + `daoAddress`. Compute the transition against the previously-sanctioned set for this DAO:
+   - **address newly present** AND it resolves to a read-only navigator bound to this DAO → `trust_status = 'sanctioned'`.
+   - **address previously sanctioned, now absent** → `trust_status = 'unsanctioned'` (revoked).
+   - empty array → de-sanction all read-only navigators for the DAO.
+3. **Scoping guard.** Apply a sanction only to an address whose `NavigatorDeployed.daoShip == daoAddress` and whose `navigator_type` is a read-only type. Silently ignore listed addresses that point at a different DAO, are permissioned (already vouched by `NavigatorSet`), or are unknown contract types. A vault can only sanction *its own* read-only navigators.
+4. **Ordering hold.** If a listed address has no `ds_navigators` row yet (the sanction post was processed before that navigator's `NavigatorDeployed`), persist the intent keyed by `(daoAddress, address)` and apply it when `NavigatorDeployed` later creates the row — mirror the existing hold-until-discovered pattern for navigator metadata.
+5. **Materialize on flip to `'sanctioned'`.** Because of the volumetric-spam bound above, a freshly-sanctioned navigator's polls may have been *seen but not materialized*. On the `→ sanctioned` transition, backfill its `PollCreated` / `Voted` / `PollCancelled` into `ds_signal_polls` / `ds_signal_votes` (replay from `ds_processed_logs` or re-fetch by address). This is the step indexer devs most often miss — sanctioning must trigger backfill, not just toggle a column.
+6. **Hide (don't delete) on flip to `'unsanctioned'`.** Keep the rows for audit; exclude them from default feeds by `trust_status`. De-sanction is reversible — a later post can re-add the address.
+
+**State transitions for a read-only navigator's `trust_status`:**
+
+| From | Event | To |
+|------|-------|-----|
+| (new row) | `NavigatorDeployed`, `daoShip` resolves to known DAO | `self_asserted` |
+| `self_asserted` | listed in vault `daoships.dao.navigators` | `sanctioned` |
+| `self_asserted` / `sanctioned` | weight reconciliation fails (fabricated weights) | `fabricated` (terminal; suppress) |
+| `sanctioned` | absent from a later vault `daoships.dao.navigators` | `unsanctioned` |
+| `unsanctioned` | listed again in a later vault post | `sanctioned` |
+
+Permissioned navigators never enter this machine — they are `'sanctioned'` by virtue of `NavigatorSet`, and `daoships.dao.navigators` does not apply to them.
+
 ### Navigator Type and Metadata Discovery
 
 All DAO Ships navigators implement `INavigator` and expose both a `navigatorType` public constant and a `deployer` immutable:
@@ -999,6 +1192,8 @@ try {
 Known types:
 - `"OnboarderNavigator"` — native QUAI tribute onboarding
 - `"ERC20TributeNavigator"` — ERC20 tribute onboarding
+- `"NFTGatedNavigator"` — ERC-721-gated onboarding (one claim per tokenId)
+- `"SignalNavigator"` — non-binding share-weighted polls; **no permission, never registered via `NavigatorSet`** (discovered from `NavigatorDeployed` only)
 - Future navigators will follow the same pattern
 
 **`NavigatorDeployed` vs `navigatorType()` view function:** The `NavigatorDeployed` event provides richer data (name, description) in addition to the type and deployer. The `navigatorType()` view function remains useful as a fallback and for legacy navigators. Both sources are equally authoritative for the type string.
@@ -1023,6 +1218,8 @@ artifacts/contracts/tokens/SharesERC20.sol/SharesERC20.json
 artifacts/contracts/tokens/LootERC20.sol/LootERC20.json
 artifacts/contracts/navigators/OnboarderNavigator.sol/OnboarderNavigator.json
 artifacts/contracts/navigators/ERC20TributeNavigator.sol/ERC20TributeNavigator.json
+artifacts/contracts/navigators/NFTGatedNavigator.sol/NFTGatedNavigator.json
+artifacts/contracts/navigators/SignalNavigator.sol/SignalNavigator.json
 artifacts/contracts/tools/Poster.sol/Poster.json
 ```
 
@@ -1060,6 +1257,8 @@ The indexer monitors `DAOShipLauncher` and `DAOShipAndVaultLauncher` for launch 
 
 | Change | Impact | What to do |
 |--------|--------|------------|
+| **New: SignalNavigator (read-only polls)** | New navigator type emitting `PollCreated` / `Voted` / `PollCancelled`. Holds **no permission**, so it **never fires `NavigatorSet`** — an indexer that registers navigators only from `NavigatorSet` will index zero polls. | Discover it from `NavigatorDeployed` and route monitoring by `navigatorType` (see [Permissionless (read-only) navigators](#permissionless-read-only-navigators)). Add the three topic0 handlers and the `ds_signal_polls` / `ds_signal_votes` tables. Loot is excluded from tallies — `weight` is share power at `votingStarts - 1`. |
+| **New: NFTGatedNavigator** | New navigator type emitting the standard `Onboard` **plus** `NFTClaimed(address,address,uint256,uint256,uint256)`. Registered normally via `NavigatorSet`. | Add the `NFTClaimed` topic0 handler and `ds_nft_claims` table (see §4). No change to the generic `Onboard` path. |
 | **`state()` now returns Expired for unsponsored expired proposals (v6)** | Previously, an unsponsored proposal past its explicit expiration returned `Submitted (1)`. Now correctly returns `Expired (8)`. | If the indexer calls `state()` to display proposal status, expired unsponsored proposals will now show as Expired instead of Submitted. No code change needed unless the indexer had a workaround for the old behavior. |
 | **Defeated proposals require empty calldata (v6)** | `processProposal(id, proposalData)` now reverts with `HashMismatch()` if `proposalData` is non-empty for a Defeated proposal. Previously accepted any data. | If the indexer or a keeper bot calls `processProposal` to close defeated proposals, pass `"0x"` (empty bytes) as `proposalData`. Non-empty data will revert. |
 | **OOG grief protection (v5)** | If `processProposal` catches an OOG revert and `gasleft() < 50,000`, the entire transaction reverts with `InsufficientProcessGas()` instead of marking `actionFailed=true`. The proposal stays in Ready state. | If the indexer monitors for failed `processProposal` transactions, distinguish `InsufficientProcessGas` (proposal still Ready, can be retried with more gas) from `actionFailed=true` in `ProcessProposal` event (proposal permanently consumed). |

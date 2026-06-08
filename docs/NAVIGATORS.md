@@ -92,7 +92,7 @@ Upstream zodiacBaal includes TributeMinion -- a proposal-gated escrow for member
 
 ### Priority 1: Blocking for Protocol/Investment DAOs
 
-#### TimelockNavigator (GOVERNOR)
+#### TimelockNavigator (GOVERNOR) — **SHIPPED**
 
 **What it does:** Wraps `setGovernanceConfig` behind a mandatory delay. When governance passes a parameter change, it is queued for N hours/days before taking effect. Members who disagree can ragequit during the delay.
 
@@ -104,9 +104,15 @@ Upstream zodiacBaal includes TributeMinion -- a proposal-gated escrow for member
 
 **Urgency:** Non-negotiable at $1M+ treasury.
 
-**Architecture:** The navigator is registered as a GOVERNOR on DAOShip. Governance proposals no longer call `daoShip.setGovernanceConfig()` directly -- instead they call `timelockNavigator.queueChange(bytes governanceConfig)`. After `delay` seconds elapse, anyone can call `executeChange(bytes32 changeId)` to forward the config to DAOShip. No DAOShip code changes required.
+**Architecture:** The navigator is registered as a GOVERNOR on DAOShip. By convention, governance proposals no longer call `daoShip.setGovernanceConfig()` directly -- instead they call `timelockNavigator.queueChange(bytes governanceConfig)`. After `delay` seconds elapse, anyone can call `executeChange(uint256 changeId, bytes governanceConfig)` to forward the config to DAOShip. No DAOShip code changes required.
 
 The delay is additive to the existing proposal lifecycle: `votingPeriod` -> `gracePeriod` -> proposal processed (calls `queueChange`) -> `delay` (second ragequit window) -> `executeChange`. Members see the exact parameters that will take effect and can exit before they do.
+
+**Config storage is hash-only.** Only `keccak256(governanceConfig)` is stored on-chain (gas). The full config bytes are emitted in `ChangeQueued` and must be re-supplied to `executeChange`, where they are hash-checked. The navigator does not decode or validate the config — `DAOShip.setGovernanceConfig` validates it at execute time, so a malformed config simply cannot be executed and expires harmlessly (the `executed` flag is set before the forward call and rolled back by EVM atomicity on revert — no lock-out).
+
+> **⚠️ Advisory, not enforced.** The timelock cannot be made mandatory at the contract layer. A governance proposal can always bypass it and call `setGovernanceConfig` directly via `DAOShip.executeAsGovernance`, because that path runs the inner call as `msg.sender == address(daoShip)`, which `onlyGovernor` accepts. `lockGovernor()` does **not** close this — governance reaches governor functions through `executeAsGovernance` regardless of navigator locks. So the guarantee is:
+> - **Enforced** against a rogue/buggy GOVERNOR *navigator* (it can only queue delayed, cancellable, visible changes) — provided the timelock is the only GOVERNOR navigator granted.
+> - **Advisory** against a malicious *proposal* — a proposal author can route around it. "All config changes go through the timelock" is enforced in the **app** (the dapp routes config changes through `queueChange`) and surfaced by the **indexer** (elevate a warning on any proposal that calls `setGovernanceConfig` directly on a timelock-enabled DAO). Making it truly mandatory would require a DAOShip change and is out of scope for a navigator.
 
 **State variables:**
 
@@ -141,10 +147,12 @@ function cancelChange(uint256 changeId) external;
 function emergencyCancelAll() external;
 ```
 
-- `queueChange` -- restricted to `msg.sender == daoShip.avatar()` (only via governance proposal). Stores `keccak256(_governanceConfig)` (not full bytes -- gas optimization).
-- `executeChange` -- permissionless after delay. Verifies hash, time window. Calls `daoShip.setGovernanceConfig(_governanceConfig)`.
+- `queueChange` -- restricted to `msg.sender == daoShip.avatar()` (only via governance proposal). Reverts `IsPaused` when paused. Stores `keccak256(_governanceConfig)` (not full bytes -- gas optimization); emits full bytes in `ChangeQueued`.
+- `executeChange` -- permissionless after delay (`nonReentrant`). Verifies the change exists, is not executed/cancelled, is within `[executableAfter, expiresAt]`, and that the supplied bytes hash to the stored hash. Calls `daoShip.setGovernanceConfig(_governanceConfig)`. Not blocked by pause (use cancel/emergencyCancelAll to stop pending changes).
 - `cancelChange` -- avatar only.
-- `emergencyCancelAll` -- GOVERNOR or avatar. Cancels all pending changes and pauses.
+- `emergencyCancelAll` -- GOVERNOR or avatar. Cancels all pending changes and pauses. Bounded by `changeCount`, which grows slowly (one full multi-day proposal per queued change).
+- `pause` / `unpause` -- GOVERNOR or avatar. Pause blocks new `queueChange` calls only.
+- `isExecutable(changeId)` view -- true iff the change is ready, unexpired, and not executed/cancelled (for frontends/keepers).
 
 **Events:** `ChangeQueued`, `ChangeExecuted`, `ChangeCancelled`, `Paused`, `Unpaused`.
 
@@ -163,7 +171,11 @@ function emergencyCancelAll() external;
 9. Emergency cancel all: multiple queued changes cancelled
 10. Fuzz: random delays/configs/timestamps -- invariant: config never changes before delay
 
-**Estimated size:** ~150 lines of Solidity.
+**Tests:**
+- **Unit** — `test/unit/TimelockNavigator.test.ts` (28 passing). Constructor bounds (`DelayTooShort`/`DelayTooLong`/expiry window/zero DAO), avatar-gated `queueChange` + `IsPaused`, the happy-path execute applying config to DAOShip, permissionless execution, every revert path (`ChangeNotReady`, `ChangeExpired`, `ConfigHashMismatch`, `ChangeAlreadyExecuted`, `ChangeAlreadyCancelled`, `ChangeDoesNotExist`), the no-lock-out behavior when DAOShip rejects a malformed config, the missing-GOVERNOR-permission revert, exact `[executableAfter, expiresAt]` boundaries, cancel auth, `pause`/`unpause`/`emergencyCancelAll` (cancels pending, leaves executed, pauses), and the `isExecutable` view.
+- **Local E2E** — `test/e2e/local/TimelockNavigator.e2e.test.ts` (3 passing). Real DAOShip driven through the full proposal lifecycle: registering the timelock as GOVERNOR via governance, a passed proposal queueing a change (arriving as `msg.sender == avatar`), executing after the delay, avatar cancelling via a follow-up proposal, and an explicit test proving the **advisory bypass** (a proposal applies config directly via `executeAsGovernance` while `changeCount` stays 0).
+
+**Status:** Shipped. Contract `contracts/navigators/TimelockNavigator.sol` (~290 lines incl. NatSpec), deploy script `scripts/deploy/007_deploy_timelock_navigator.ts`. Must be registered with GOVERNOR (4) via a `setNavigators` governance proposal. Advisory at the contract layer (see warning above) — usage is enforced in the app and bypass is flagged by the indexer.
 
 ---
 
@@ -359,77 +371,82 @@ function getDelegateInfo(address delegate) external view returns (
 
 ---
 
-#### SignalNavigator (No Permission)
+#### SignalNavigator (No Permission) — **SHIPPED**
 
-**What it does:** Non-executing governance polls. Members vote using share weight, but no on-chain action executes. Used for temperature checks before committing to binding proposals.
+**What it does:** Non-executing, share-weighted governance polls. Members vote using their delegation-aware voting power, but no on-chain action executes. Used for temperature checks before committing to binding proposals. Polls can open immediately or be **scheduled** to open at a future time.
 
 **Why DAO Ships needs this:** DAOShip proposals are heavyweight -- full votingPeriod + gracePeriod, retention check, gas to process. A proposal that does nothing still costs 10 days and requires 100 voters at 10% quorum.
 
 **Why it matters at 1000+ members:** Gauging community sentiment on 5 potential directions before committing to one binding proposal would take 50 days through DAOShip's proposal system. Signal polls with 24-48 hour durations compress this to days. They also reduce voter fatigue -- members know signal polls carry no execution risk.
 
-**Permission:** None. Standalone contract that records share-weighted votes by reading `balanceOf` snapshots.
+**Permission:** None. The lowest-blast-radius navigator in the suite: it **never calls a mutating function on DAOShip**. It only reads voting power and writes its own poll storage, so a bug cannot mint, burn, pause, or alter governance — the worst case is a mis-tallied, non-binding poll. No governance proposal is needed to wire it up; deploy and use.
 
-**Architecture:** Fully standalone -- does NOT need any DAOShip navigator permission. Reads share balances from SharesERC20 using `getPriorVotes` (the DAOShipVotes checkpoint system) for snapshot-based voting. Has its own lightweight poll lifecycle separate from DAOShip's proposal system.
+**Official onboarding (sanctioning):** Because it holds no permission, a SignalNavigator is **never registered via `setNavigators()` and emits no `NavigatorSet`** — its DAO association comes only from the indexed `daoShip` in its `NavigatorDeployed` event, which is *self-asserted* (anyone can deploy a contract claiming any DAO). It still *functions* unsanctioned — "deploy and use" is unchanged — but to be **officially endorsed** (and surfaced by default in indexers/frontends rather than flagged "unverified"), the DAO passes a governance proposal that has the **vault post a `daoships.dao.navigators` allowlist** naming the navigator address. That post is authenticated (`msg.sender == vault`), grants **zero permission**, and is purely a trust signal — it changes how the poll is *displayed*, not what the contract can *do*. See [POSTER.md → DAO Sanctioned Navigators](POSTER.md#dao-sanctioned-navigators-daoshipsdaonavigators) for the tag schema and [INDEXER-GUIDE.md → Protecting DAOs from spam read-only navigators](INDEXER-GUIDE.md#protecting-daos-from-spam-read-only-navigators) for how indexers consume it. This sanctioning path is the model for **all** future read-only (no-permission) navigators, e.g. `DelegateRegistryNavigator`.
+
+**Architecture:** Fully standalone — reads delegation-aware voting power via `daoShip.getPriorVotes()` (which proxies the DAOShipVotes checkpoint system). No `BaseNavigator` inheritance (no minting/caps/allowlist), no ReentrancyGuard (no value transfers, no untrusted external calls), no pause (non-executing).
+
+**Scheduling + snapshot-at-START (not creation):** Each poll stores `snapshotTimestamp = votingStarts - 1`. Because votes can only land once `block.timestamp >= votingStarts`, the snapshot is always strictly in the past at vote time, so `getPriorVotes` never trips its `timepoint < block.timestamp` guard — **no keeper / "activation" tx is required**; the snapshot point is simply *defined* as poll-start and resolved lazily on the first vote. Voting power is therefore measured the instant voting opens: shares/delegations settled *before* start count (a scheduled poll gives a lead window to organize delegation); anything acquired *after* start carries no weight (anti-vote-buying). `startTime == 0` opens immediately (`votingStarts = block.timestamp`); otherwise `block.timestamp <= startTime <= block.timestamp + maxStartDelay`. Set `maxStartDelay = 0` to forbid scheduling (immediate-only).
+
+**Two distinct snapshots, by design:** *creation gating* checks the creator's power at `now - 1` (you need shares to open a poll today, and the poll's own snapshot may be in the future and thus unqueryable at creation); the *poll voting snapshot* is at `votingStarts - 1`.
+
+**Constructor bounds:** `minDuration > 0`, `maxDuration` in `[minDuration, MAX_WINDOW]`, `maxStartDelay <= MAX_WINDOW`, where `MAX_WINDOW = 3650 days` — an overflow backstop for the uint64 timestamp math and a sanity gate against nonsensical config.
+
+**Same-block caveat (immediate polls):** an immediate poll snapshots at `block.timestamp - 1`, so holders whose *first* checkpoint is the creation block (shares acquired in the **same block** as `createPoll`) read as 0 weight. Schedule the poll, or let a block pass after minting, to include same-block acquisitions.
 
 **State variables:**
 
 ```solidity
+address public immutable deployer;        // INavigator: set to msg.sender in constructor
 DAOShip public immutable daoShip;
-IDAOShipVotingToken public immutable sharesToken;
+uint256 public immutable minSharesToCreatePoll;
+uint64  public immutable minDuration;
+uint64  public immutable maxDuration;
+uint64  public immutable maxStartDelay;   // 0 = immediate-only (no scheduling)
+
+enum Status { Pending, Active, Ended, Cancelled }
 
 struct Poll {
     address creator;
-    string question;          // IPFS hash or short text
-    uint8 optionCount;        // 2-10
-    uint64 snapshotTimestamp;  // block.timestamp at creation - 1
+    string question;            // IPFS hash or short text
+    uint8 optionCount;          // MIN_OPTIONS..MAX_OPTIONS (2..10)
+    uint64 snapshotTimestamp;   // votingStarts - 1; voting power measured here
+    uint64 votingStarts;
     uint64 votingEnds;
     bool cancelled;
     mapping(uint8 => uint256) optionVotes;
-    mapping(address => bool) hasVoted;
+    mapping(address => bool) voted;
 }
 
 uint256 public pollCount;
-mapping(uint256 => Poll) public polls;
-uint256 public immutable minSharesToCreatePoll;
-uint256 public immutable maxDuration;
-uint256 public immutable minDuration;
+mapping(uint256 => Poll) public polls;   // public getter omits nested mappings
 ```
-
-**Snapshot mechanism:** Reads `sharesToken.getPriorVotes(voter, poll.snapshotTimestamp)` at vote time. Snapshot is `block.timestamp - 1` at poll creation. Reuses DAOShipVotes' existing checkpoint system -- prevents vote buying (acquiring shares after poll creation does not grant voting power).
 
 **Key functions:**
 
 ```solidity
-function createPoll(string calldata question, uint8 optionCount, uint256 duration) external returns (uint256 pollId);
+function createPoll(string calldata question, uint8 optionCount, uint64 startTime, uint64 duration) external returns (uint256 pollId);
 function vote(uint256 pollId, uint8 option) external;
 function cancelPoll(uint256 pollId) external;
 function getOptionVotes(uint256 pollId, uint8 option) external view returns (uint256);
 function getResults(uint256 pollId) external view returns (uint256[] memory);
 function hasVoted(uint256 pollId, address voter) external view returns (bool);
+function pollStatus(uint256 pollId) external view returns (Status);
 ```
 
-- `createPoll` -- requires `getPriorVotes(msg.sender, block.timestamp - 1) >= minSharesToCreatePoll`.
-- `vote` -- checks not already voted, within deadline, valid option. Weight = `getPriorVotes(msg.sender, snapshotTimestamp)`. Requires weight > 0.
-- No ReentrancyGuard needed (no external calls with value). No pause needed (non-executing).
+- `createPoll` — validates option count (2..10), duration (`minDuration..maxDuration`) and start time; requires `getPriorVotes(msg.sender, block.timestamp - 1) >= minSharesToCreatePoll`.
+- `vote` — checks poll exists, not cancelled, started, not ended, valid option, not already voted. The window is **half-open `[votingStarts, votingEnds)`** (start inclusive, end exclusive) — exactly matching `DAOShip.castVote`, so a poll is votable for precisely `duration` seconds. Weight = `getPriorVotes(msg.sender, snapshotTimestamp)`; requires weight > 0.
+- `cancelPoll` — **before voting opens:** creator or avatar. **After voting opens:** avatar only (so a creator cannot nuke an in-progress poll they are losing). Cannot cancel an already-ended poll.
 
-**Events:** `PollCreated`, `Voted`, `PollCancelled`.
+**Events:** `PollCreated(pollId, creator, question, optionCount, snapshotTimestamp, votingStarts, votingEnds)`, `Voted(pollId, voter, option, weight)`, `PollCancelled(pollId, caller)`, `NavigatorDeployed`.
 
-**Custom errors:** `InsufficientShares`, `InvalidOptionCount`, `InvalidDuration`, `PollEnded`, `PollCancelled`, `AlreadyVoted`, `InvalidOption`, `NoVotingPower`, `NotAuthorized`.
+**Custom errors:** `InvalidConfig`, `InsufficientShares`, `InvalidOptionCount`, `InvalidDuration`, `InvalidStartTime`, `PollDoesNotExist`, `PollNotStarted`, `PollHasEnded`, `PollIsCancelled`, `AlreadyVoted`, `InvalidOption`, `NoVotingPower`, `NotAuthorized`.
 
-**Test scenarios:**
+**Tests:**
+- **Unit** — `test/unit/SignalNavigator.test.ts` (37 passing). Immediate & scheduled polls, the full `pollStatus` lifecycle (Pending→Active→Ended/Cancelled), share-weighted tallies, every revert path, the creator-vs-avatar cancel rule, the snapshot-at-start guarantees (shares acquired after the snapshot carry no weight; a scheduled poll's pre-start lead window does count), the half-open window boundaries (votable at exactly `votingStarts`, closed at exactly `votingEnds`), multiple coexisting polls with independent tallies, view-side reverts for unknown ids, and the `MAX_WINDOW` constructor caps.
+- **Local E2E** — `test/e2e/local/SignalNavigator.e2e.test.ts` (5 passing, CI-runnable on Hardhat). Integration against a real DAOShip: delegation flowing through `getPriorVotes` (re-snapshot moves weight), **loot excluded** from voting weight (only shares vote), creation gating on live DAO power, and the scheduled/cancel lifecycle.
+- **Onchain E2E** — Phase 2e in `test/e2e/onchain/OnChainDAOLifecycle.test.ts` (validate against Cyprus1/Orchard). Deploys SignalNavigator with **no permission**, opens a poll, two members vote with snapshot-exact weights, asserts the tally + `PollCreated`/`Voted` events and the one-vote-per-address guard.
 
-1. Happy path: 3 options, 3 voters with different weights, verify tallies
-2. Revert: double vote -> `AlreadyVoted`
-3. Revert: vote after deadline -> `PollEnded`
-4. Revert: invalid option index -> `InvalidOption`
-5. Revert: 0 shares -> `InsufficientShares`
-6. Revert: delegated all shares -> `NoVotingPower`
-7. Snapshot integrity: acquire shares after creation, verify 0 voting power
-8. Cancel: creator cancels, voting reverts
-9. Duration bounds: below min or above max -> `InvalidDuration`
-10. Fuzz: random weights/options -- invariant: sum(optionVotes) == sum(voter weights)
-
-**Estimated size:** ~130 lines of Solidity.
+**Status:** Shipped & audited. Contract `contracts/navigators/SignalNavigator.sol` (~325 lines incl. NatSpec), deploy script `scripts/deploy/006_deploy_signal_navigator.ts`. Reads voting power via `daoShip.getPriorVotes()` — no separate token interface wired. A three-lens audit (security / gas / correctness) found no Critical/High issues; the `MAX_WINDOW` caps, same-block-snapshot documentation, and expanded boundary/multi-poll tests above were the resulting hardening.
 
 ---
 
@@ -782,8 +799,8 @@ function isDelinquent(address member) external view returns (bool);
 | Phase | Navigators | Enables |
 |-------|---------|---------|
 | **v1.0 (shipped)** | OnboarderNavigator, ERC20TributeNavigator | Startup, Community, Agent DAOs |
-| **v1.1** | TimelockNavigator, BudgetNavigator | Protocol, Investment DAOs |
-| **v1.2** | SignalNavigator, DelegateRegistryNavigator, NFTGatedNavigator | 200+ member governance, credential-gated DAOs |
+| **v1.1** | TimelockNavigator (**shipped**), BudgetNavigator | Protocol, Investment DAOs |
+| **v1.2** | SignalNavigator (**shipped**), DelegateRegistryNavigator, NFTGatedNavigator (**shipped**) | 200+ member governance, credential-gated DAOs |
 | **v2.0** | VestingNavigator, CircuitBreakerNavigator | Core contributor compensation, safety automation |
 | **v2.1** | OracleNavigator, SubscriptionNavigator | Adaptive governance, recurring fees |
 
@@ -794,8 +811,8 @@ function isDelinquent(address member) external view returns (bool);
 | OnboarderNavigator | Required | Required | Required | Required | Required | **Shipped** |
 | ERC20TributeNavigator | Optional | Required | Required | Required | -- | **Shipped** |
 | BudgetNavigator | -- | Critical | Critical | -- | Critical | **Not built** |
-| SignalNavigator | -- | Useful | Critical | -- | -- | **Not built** |
-| TimelockNavigator | -- | -- | Critical | Critical | -- | **Not built** |
+| SignalNavigator | -- | Useful | Critical | -- | -- | **Shipped** |
+| TimelockNavigator | -- | -- | Critical | Critical | -- | **Shipped** |
 | VestingNavigator | -- | Useful | Critical | -- | -- | **Not built** |
 | DelegateRegistryNavigator | -- | Useful | Critical | -- | -- | **Not built** |
 | RageKick (pattern) | -- | Useful | Useful | Required | -- | **Documented** |
@@ -812,9 +829,9 @@ function isDelinquent(address member) external view returns (bool);
 |--------|-----------|---------------------|-------------|-----------|
 | OnboarderNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | Shipped |
 | ERC20TributeNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | Shipped |
-| TimelockNavigator | GOVERNOR (4) | `setGovernanceConfig` | No | ~150 |
+| TimelockNavigator | GOVERNOR (4) | `setGovernanceConfig` | No | Shipped |
 | BudgetNavigator | MANAGER (2) | `mintShares`, `mintLoot` (optional) | Yes | ~280 |
-| SignalNavigator | None | None (reads only) | No | ~130 |
+| SignalNavigator | None | None (reads only) | No | Shipped |
 | DelegateRegistryNavigator | None | None (reads only) | No | ~120 |
 | VestingNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | ~180 |
 | CircuitBreakerNavigator | ADMIN (1) | `setAdminConfig` | No | ~170 |
@@ -822,7 +839,7 @@ function isDelinquent(address member) external view returns (bool);
 | SubscriptionNavigator | MANAGER (2) | `burnShares`, `mintLoot` | No | ~190 |
 | NFTGatedNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | Shipped |
 
-**Total planned: ~1,540 lines of Solidity** across 9 contracts, plus test suites.
+**Total planned: ~1,410 lines of Solidity** across 8 contracts, plus test suites.
 
 ---
 

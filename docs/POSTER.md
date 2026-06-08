@@ -37,8 +37,9 @@ Tags follow hierarchical dot-notation: `daoships.<context>.<action>`
 | `daoships.member.profile` | Member (directly) | Minimal on-chain identity (name, avatar, bio) |
 | `daoships.proposal.vote.reason` | Voter (directly, after voting) | Why they voted the way they did |
 | `daoships.navigator.allowlist` | Navigator deployer (directly) | Merkle tree for address-gated onboarding |
+| `daoships.dao.navigators` | DAO vault (via governance proposal) | Authenticated allowlist of **read-only** navigators the DAO sanctions (endorsement, grants no permission) |
 
-**That's it.** Six tags. Everything else belongs off-chain.
+**That's it.** Seven tags. Everything else belongs off-chain.
 
 ### What Does NOT Belong in Poster
 
@@ -53,7 +54,7 @@ Tags follow hierarchical dot-notation: `daoships.<context>.<action>`
 | Navigator metadata (name, description) | Now handled by `NavigatorDeployed` event in `INavigator` — emitted atomically at construction, unforgeable | `NavigatorDeployed` event |
 | Navigator upgrade context | Already captured by `NavigatorSet` events + proposal details | Proposal `details` field |
 | Cross-DAO endorsements | Political/social — not indexer data | DAO website, social media |
-| Signal voting / polls | Will be handled by a dedicated SignalNavigator | Future navigator contract |
+| Signal voting / polls (the poll & vote data) | Handled on-chain by `SignalNavigator` events (`PollCreated` / `Voted` / `PollCancelled`) — wallet-attributed already | `SignalNavigator` contract events. (Note: *sanctioning* a SignalNavigator address — vs. the poll data — DOES use Poster: `daoships.dao.navigators`, below) |
 | Member governance statements | Blog post — no trust benefit over a forum profile | Forum, personal site |
 
 ---
@@ -200,6 +201,42 @@ Posted by the navigator deployer immediately after deploying a navigator with an
 
 **Deduplication:** Key: `msg.sender` + `tag` + `daoAddress` + `navigatorAddress`. Last-write-wins. In practice, allowlists are set once (the navigator's `allowlistRoot` is immutable).
 
+### DAO Sanctioned Navigators (`daoships.dao.navigators`)
+
+Posted by the DAO **vault via a governance proposal**. This is the DAO's authenticated allowlist of **read-only navigators** it endorses — the official-onboarding mechanism for navigators that hold no permission and therefore never pass through `setNavigators()` / `NavigatorSet` (today: `SignalNavigator`).
+
+**Why this exists:** A read-only navigator's DAO association is *self-asserted* — `NavigatorDeployed(daoShip, …)` is permissionless, so anyone can deploy a contract claiming association with any DAO and start emitting polls. There is no `NavigatorSet` from the DAO to vouch for it. This post is that missing vouch: because it comes from the vault (`msg.sender == vault`, gated by a governance vote), it is an unforgeable, DAO-consented endorsement — **and it grants zero on-chain permission.** It is purely a trust signal for indexers and frontends; it does not change what the navigator can do on-chain (a read-only navigator works whether sanctioned or not — sanctioning only governs how it is surfaced).
+
+```json
+{
+  "schemaVersion": "1.0",
+  "daoAddress": "0x00...*",
+  "navigators": [
+    { "address": "0x00...*", "type": "SignalNavigator" }
+  ]
+}
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `daoAddress` | Yes | The DAO's DAOShip contract address. MUST match the vault's DAO. |
+| `navigators` | Yes | The **complete** set of sanctioned read-only navigators as of this post (see semantics). May be empty `[]` to clear all sanctions. |
+| `navigators[].address` | Yes | Navigator contract address. Must be valid hex. |
+| `navigators[].type` | No | Expected `navigatorType` (e.g. `"SignalNavigator"`), for sanity-checking against the on-chain value. |
+
+**Canonical-set, last-write-wins semantics.** The `navigators` array is the **full** sanctioned set, not a delta. The latest post from the vault entirely replaces the previous list:
+- An address newly present → `trust_status = 'sanctioned'`.
+- An address that was sanctioned but is now **absent** → de-sanctioned (`trust_status = 'unsanctioned'`). Omitting an address revokes it — always re-list everything you still endorse.
+- An empty array clears all sanctions for the DAO.
+
+**Trust verification:** Index ONLY when `msg.sender == DAO vault (avatar)`. A `daoships.dao.navigators` post from any other address is spam — discard it. The vault address is the one stored as the DAO's `avatar` (from `LaunchDAOShipAndVault` / `SetupComplete`).
+
+**Scoping guard:** Sanctions are only meaningful for navigators whose own `NavigatorDeployed.daoShip` equals this `daoAddress`. A vault cannot sanction a navigator pointed at a *different* DAO — the indexer MUST ignore any listed address that does not resolve to a read-only navigator bound to this DAO. Sanctioning a permissioned navigator is a no-op (those are already vouched by `NavigatorSet`).
+
+**Ordering:** If a sanction lists an address before the indexer has seen that navigator's `NavigatorDeployed`, hold the intent keyed by `(daoAddress, address)` and apply it when the `NavigatorDeployed` arrives — the same hold-until-discovered pattern used for navigator metadata.
+
+**Deduplication:** Key: `msg.sender` (vault) + `tag` + `daoAddress`. Last-write-wins.
+
 ---
 
 ## The `details` Field Convention
@@ -284,13 +321,41 @@ await poster.post(
 );
 ```
 
+### Pattern 4: Sanction a Read-Only Navigator (Governance Proposal)
+
+Officially onboard a `SignalNavigator` (or any read-only navigator) by having the vault post the DAO's sanctioned-navigator allowlist. This is a governance action — the post executes from the vault, so it is authenticated and grants no permission.
+
+```typescript
+const posterInterface = new ethers.Interface(["function post(string content, string tag)"]);
+
+// Re-list EVERY navigator the DAO still endorses — this is the full set, not a delta.
+const content = JSON.stringify({
+  schemaVersion: "1.0",
+  daoAddress: daoShipAddress,
+  navigators: [
+    { address: signalNavigatorAddress, type: "SignalNavigator" }
+    // ...any other read-only navigators the DAO continues to sanction
+  ]
+});
+const postData = posterInterface.encodeFunctionData("post", [content, "daoships.dao.navigators"]);
+
+// Wrap in MultiSend format and submit as a governance proposal (executes from the vault)
+const proposalData = encodeProposalData([posterAddress], [0n], [postData]);
+await daoShip.submitProposal(proposalData, 0, JSON.stringify({
+  title: "Sanction SignalNavigator for temperature checks",
+  type: "navigator_add"
+}));
+```
+
+To **revoke** a sanction, submit a new proposal that re-posts the list with that address omitted (or an empty `navigators: []` to clear all).
+
 ---
 
 ## Trust Model
 
 | `msg.sender` | Trust Level | Tags They Can Post |
 |--------------|-------------|-------------------|
-| DAO vault address | **Verified** — governance-approved | `dao.profile`, `dao.announcement` |
+| DAO vault address | **Verified** — governance-approved | `dao.profile`, `dao.announcement`, `dao.navigators` |
 | Deployer wallet (matches launch event) | **Verified (initial)** — one-time at launch | `dao.profile.initial` |
 | Member wallet (shares > 0) | **Member** — verified shareholder | `member.profile`, `proposal.vote.reason`, `navigator.allowlist` |
 | Any other address | **Untrusted** — do not index | — |
@@ -400,6 +465,8 @@ Poster complements DAOShip's built-in events — it does not replace them.
 | Member identity | **Poster** (`daoships.member.profile`) | Wallet-attributed identity |
 | DAO configuration | `SetupComplete`, `GovernanceConfigSet` events | On-chain governance parameters |
 | DAO branding and links | **Poster** (`daoships.dao.profile`) | Governance-approved social metadata |
+| Permissioned navigator authorization | `NavigatorSet` event | On-chain permission grant — must be contract state |
+| Read-only navigator endorsement | **Poster** (`daoships.dao.navigators`) | No permission to grant; authenticated endorsement via the vault is the only DAO-consented signal |
 | Vote reasoning | **Poster** (`daoships.proposal.vote.reason`) | Wallet-attributed commentary |
 | Treasury address labels | **Off-chain** (frontend address book) | No trust benefit from on-chain attribution |
 

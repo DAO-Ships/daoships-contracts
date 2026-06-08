@@ -353,6 +353,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   let onboarderNavigator: quais.Contract;
   let erc20TributeNavigator: quais.Contract;
   let nftGatedNavigator: quais.Contract;
+  let signalNavigator: quais.Contract; // no-permission, non-binding polls
   let nftGateToken: quais.Contract; // MockERC721 gate collection
   let tributeToken: quais.Contract;
 
@@ -364,6 +365,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   let OnboarderNavigatorABI: any;
   let ERC20TributeNavigatorABI: any;
   let NFTGatedNavigatorABI: any;
+  let SignalNavigatorABI: any;
   let MockERC721ABI: any;
   let MockERC20ABI: any;
 
@@ -520,6 +522,12 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     NFTGatedNavigatorABI = JSON.parse(
       fs.readFileSync(
         path.join(artifactsDir, "navigators/NFTGatedNavigator.sol/NFTGatedNavigator.json"),
+        "utf-8"
+      )
+    ).abi;
+    SignalNavigatorABI = JSON.parse(
+      fs.readFileSync(
+        path.join(artifactsDir, "navigators/SignalNavigator.sol/SignalNavigator.json"),
         "utf-8"
       )
     ).abi;
@@ -856,6 +864,44 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     const nftGatedNavigatorAddress = await nftGatedNavigatorInstance.getAddress();
     console.log(`   ✅ NFTGatedNavigator: ${nftGatedNavigatorAddress}\n`);
     nftGatedNavigator = nftGatedNavigatorInstance;
+
+    // Deploy SignalNavigator for Phase 2e (non-binding temperature-check polls).
+    // NO PERMISSION: it reads voting power via daoShip.getPriorVotes() and never mutates the
+    // DAO, so it is intentionally NOT added to the navigators[] permission array below.
+    console.log("   Deploying SignalNavigator...");
+    const SignalNavigatorJson = JSON.parse(
+      fs.readFileSync(
+        path.join(__dirname, "../../../artifacts/contracts/navigators/SignalNavigator.sol/SignalNavigator.json"),
+        "utf-8"
+      )
+    );
+    const signalIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(SignalNavigatorJson.bytecode);
+    const SignalNavigatorFactory = new quais.ContractFactory(
+      SignalNavigatorABI,
+      SignalNavigatorJson.bytecode,
+      deployer,
+      signalIpfsHash
+    );
+    // SignalNavigator constructor: daoShip, minSharesToCreatePoll, minDuration, maxDuration, maxStartDelay, name, description
+    const signalMinShares = process.env.SIGNAL_MIN_SHARES_TO_CREATE
+      ? quais.parseQuai(process.env.SIGNAL_MIN_SHARES_TO_CREATE)
+      : 0n;
+    const signalMinDuration = parseInt(process.env.SIGNAL_MIN_DURATION || "3600");
+    const signalMaxDuration = parseInt(process.env.SIGNAL_MAX_DURATION || "2592000");
+    const signalMaxStartDelay = parseInt(process.env.SIGNAL_MAX_START_DELAY || "2592000");
+    const signalNavigatorInstance = await SignalNavigatorFactory.deploy(
+      predictedDAOShipAddress,
+      signalMinShares,
+      signalMinDuration,
+      signalMaxDuration,
+      signalMaxStartDelay,
+      "Signal",
+      "non-binding temperature checks"
+    );
+    await signalNavigatorInstance.waitForDeployment();
+    const signalNavigatorAddress = await signalNavigatorInstance.getAddress();
+    console.log(`   ✅ SignalNavigator: ${signalNavigatorAddress} (no permission)\n`);
+    signalNavigator = signalNavigatorInstance;
 
     // Configuration from .env.e2e
     const votingPeriod = parseInt(process.env.VOTING_PERIOD || "3600"); // 1 hour minimum (M-7 fix)
@@ -1282,6 +1328,71 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log(`   (+${quais.formatQuai(carolSharesAfter - carolSharesBefore)} shares via NFT gate)`);
     console.log(`   claimed(#${tokenId}) = true (one claim per tokenId, forever)`);
     console.log(`\n✅ NFTGatedNavigator onboarding working on-chain (claim ticket per tokenId)\n`);
+  });
+
+  it("Should run a non-binding poll via SignalNavigator", async function () {
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("PHASE 2e: Temperature Check (SignalNavigator)");
+    console.log("═══════════════════════════════════════════════════════════\n");
+
+    // Immediate 3-option poll opened by the deployer (a share-holder). startTime 0 => opens now,
+    // shortest allowed window. No governance proposal and no permission grant are involved.
+    const minDuration = await signalNavigator.minDuration();
+    const createTx = await signalNavigator.connect(deployer).createPoll(
+      "ipfs://temperature-check",
+      3,
+      0,
+      minDuration
+    );
+    const createReceipt = await createTx.wait();
+    console.log(`   ✅ createPoll tx: ${createReceipt.hash}`);
+
+    // Pull the pollId from the PollCreated event
+    let pollId: bigint | undefined;
+    for (const log of createReceipt.logs) {
+      try {
+        const parsed = signalNavigator.interface.parseLog(log);
+        if (parsed && parsed.name === "PollCreated") pollId = parsed.args.pollId;
+      } catch {
+        // not a SignalNavigator event — skip
+      }
+    }
+    expect(pollId, "PollCreated event should be emitted").to.not.be.undefined;
+    console.log(`   ✅ Poll #${pollId} created (PollCreated)`);
+
+    // Weights are measured at the poll snapshot (votingStarts - 1) — read exactly what the
+    // contract will use, so the tally assertion is airtight. Loot does NOT count, only shares.
+    const poll = await signalNavigator.polls(pollId!);
+    const snapshot = poll.snapshotTimestamp;
+    const deployerWeight = await daoShip.getPriorVotes(deployer.address, snapshot);
+    const aliceWeight = await daoShip.getPriorVotes(alice.address, snapshot);
+
+    const vote1 = await signalNavigator.connect(deployer).vote(pollId!, 0);
+    await vote1.wait();
+    const vote2 = await signalNavigator.connect(alice).vote(pollId!, 1);
+    await vote2.wait();
+    console.log(`   ✅ deployer → option 0 (weight ${quais.formatQuai(deployerWeight)})`);
+    console.log(`   ✅ alice → option 1 (weight ${quais.formatQuai(aliceWeight)})`);
+
+    // Tally reflects share-weighted votes
+    const results = await signalNavigator.getResults(pollId!);
+    expect(results[0]).to.equal(deployerWeight);
+    expect(results[1]).to.equal(aliceWeight);
+    expect(results[2]).to.equal(0n);
+    expect(await signalNavigator.hasVoted(pollId!, deployer.address)).to.equal(true);
+    expect(await signalNavigator.hasVoted(pollId!, alice.address)).to.equal(true);
+
+    // A second vote by the same member is rejected (one vote per address per poll)
+    let doubleVoteReverted = false;
+    try {
+      const tx = await signalNavigator.connect(deployer).vote(pollId!, 2);
+      await tx.wait();
+    } catch {
+      doubleVoteReverted = true;
+    }
+    expect(doubleVoteReverted, "second vote by the same member should revert").to.equal(true);
+
+    console.log(`\n✅ SignalNavigator non-binding poll working on-chain (no permission, share-weighted)\n`);
   });
 
   it("Should submit, vote, and process funding proposal", async function () {
@@ -2411,9 +2522,10 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log("   ✅ BurnLoot (Phase 8)");
     console.log("\n   Exit Mechanism (1/1):");
     console.log("   ✅ Ragequit (Phase 13)");
-    console.log("\n   Navigator Events (2/2):");
+    console.log("\n   Navigator Events (3/3):");
     console.log("   ✅ Onboard (Phases 2, 2b, 2c, 2d, 3)");
     console.log("   ✅ NFTClaimed (Phase 2d, NFTGatedNavigator)");
+    console.log("   ✅ PollCreated + Voted (Phase 2e, SignalNavigator — non-binding, no permission)");
     console.log("\n   Setup (1/1):");
     console.log("   ✅ SetupComplete (Phase 1)");
     console.log("\n   Admin Operations (1/1):");
