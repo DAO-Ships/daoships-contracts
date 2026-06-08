@@ -66,10 +66,32 @@ If that proposal calls `setNavigators([attacker], [7])` via `executeAsGovernance
 **Examples of acceptable MANAGER navigators:**
 - `OnboarderNavigator` with `mintCap` set and no admin upgrade path
 - `ERC20TributeNavigator` with `pricePerShare` set, verified token address, and expiry configured
+- `NFTGatedNavigator` with a verified ERC-721 gate collection and `mintCap` set (cap is enforced mandatory in the constructor)
 
 **Examples of unacceptable MANAGER navigators:**
 - An EOA with MANAGER permission set during deployment
 - A proxy contract where the deployer controls the implementation
+
+### NFTGatedNavigator — gate-token trust and dilution bounds
+
+`NFTGatedNavigator` mints to holders of an arbitrary external **ERC-721** collection (`gateToken`). Trust considerations specific to it:
+
+- **The gate collection is untrusted code.** The only external call into it during onboarding is `ownerOf(tokenId)`, made before any state change and protected by `nonReentrant` + checks-effects-interactions, so a malicious/reentrant collection cannot recycle a claim or corrupt accounting. A collection that *lies* about ownership only harms the DAO that chose to gate on it — **verify the gate address points at the intended, legitimate collection before granting MANAGER.**
+- **Mintable collections and dilution.** If the gate collection can mint new NFTs, each new token is a potential new claim. `mintCap` is therefore **mandatory** (the constructor reverts on `mintCap == 0`) and is the hard bound on **this navigator's** issuance. Note it is *navigator-local*, not DAO-global: DAO-wide dilution is the sum of all MANAGER navigators' caps plus any governance minting. Size `mintCap` against the *maximum* plausible claimable supply, not today's supply.
+- **One claim per `tokenId`, forever.** Claim tracking is per-token (`claimed[tokenId]`), not per-address, which defeats transfer-and-reclaim recycling. Shares are a claim ticket and persist after the NFT is sold — there is no clawback. Do not use this navigator if revocable, NFT-bound membership is required (that needs an escrow-based design with non-transferable shares).
+- **ERC-721 only.** ERC-1155 is rejected by design; fungibility cannot be reliably detected on-chain, so a fungible 1155 gate would be unsafe. Use a future dedicated ERC-1155 navigator instead.
+- **To stop onboarding, use the navigator's own `pause()` (GOVERNOR or avatar).** Pausing the share/loot token via ADMIN does **not** stop minting — per M-8, token pause blocks transfers, not mint/burn — so a paused token still lets NFTGated issue governance-weighted shares.
+
+#### ⚠️ Free-mint mode voids the ragequit-as-veto cost assumption (M-01)
+
+§7 accepts the "mint-during-governance" behavior (V7-1 / M-4) on the explicit reasoning that new minting **costs full tribute**, making abuse economically equivalent to ragequit-then-re-onboard. **That rationale does not hold for an NFTGatedNavigator deployed in free-mint mode (`requireTribute = false`).** There, a holder of gate NFTs can mint shares at **zero cost**, gated only by NFT ownership and `mintCap`.
+
+If the gate collection is open-mint or attacker-controlled, this lets an attacker **costlessly manipulate the `minRetentionPercent` retention check**: by claiming during a proposal's voting window they raise total supply (and the retention high-water-mark), and can land supply above `retentionRequired` at processing time to **neutralize an honest ragequit-as-veto for free** — or inflate the high-water-mark to make a legitimate proposal easier to veto-block. Quorum (frozen shares-only snapshot at sponsor time) and mid-proposal voting power (sponsor-time `getPriorVotes` snapshot) are **not** affected — those defenses hold identically to OnboarderNavigator. Only the retention veto's *cost assumption* breaks.
+
+**Mitigations for any DAO that relies on `minRetentionPercent` as a governance check:**
+- Prefer **tribute-required** mode, or gate on a **fixed-supply, non-attacker-controlled** collection, so the cost assumption is restored.
+- During contentious votes, **`pause()` the navigator** (GOVERNOR or avatar) to halt costless minting for the duration.
+- Size `minRetentionPercent` and `mintCap` with this interaction in mind; do not assume a free-mint gate preserves the veto.
 
 ### Mint cap is navigator-local, not global
 

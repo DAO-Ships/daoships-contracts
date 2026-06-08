@@ -468,6 +468,43 @@ event Onboard(
 
 **Note:** `daoShipAddress` is new. The old indexer had to do an on-chain `baal()` lookup to associate onboarding events with a DAO.
 
+#### `Onboard` + `NFTClaimed` (NFTGatedNavigator)
+
+`navigatorType = "NFTGatedNavigator"`. ERC-721-gated onboarding (one claim per `tokenId`). It emits the standard `Onboard` event (so the generic onboarding feed/`ds_navigator_events` handler works unchanged — `amount` is the native tribute, 0 in free-mint mode) **and** an additional `NFTClaimed` event carrying the token id:
+
+```solidity
+event NFTClaimed(
+    address indexed daoShipAddress,
+    address indexed holder,
+    uint256 indexed tokenId,
+    uint256 shares,
+    uint256 loot
+);
+```
+
+**Topic0:** `keccak256("NFTClaimed(address,address,uint256,uint256,uint256)")`
+
+**Handler action:**
+- Record that `tokenId` of this navigator's gate collection has been **claimed** (spent) by `holder`. This is the canonical per-token claim status — a token can be claimed exactly once, ever, regardless of subsequent transfers.
+- `holder` received `shares` + `loot`; upsert the member record (or rely on the paired `Onboard`/`Transfer` events — do not double-count balances).
+- Because both `Onboard` and `NFTClaimed` fire in the same transaction, treat `Onboard` as the onboarding-activity source and `NFTClaimed` purely as token-level claim state. Suggested storage:
+
+```sql
+CREATE TABLE ds_nft_claims (
+    id VARCHAR(128) PRIMARY KEY,          -- {navigator_address}-{token_id}
+    dao_id VARCHAR(42) REFERENCES ds_daos(id),
+    navigator_address VARCHAR(42) NOT NULL,
+    token_id NUMERIC(78,0) NOT NULL,
+    holder VARCHAR(42) NOT NULL,          -- claimer at claim time (NFT may move later)
+    shares NUMERIC(78,0) DEFAULT '0',
+    loot NUMERIC(78,0) DEFAULT '0',
+    tx_hash VARCHAR(66),
+    created_at TIMESTAMPTZ
+);
+```
+
+The navigator's gate collection address is available from the `gateToken()` view (call once at registration). A frontend "can I join with token #N?" check maps to the `canOnboard(address,uint256)` view, or to absence of a `ds_nft_claims` row for that `(navigator, token_id)`.
+
 #### `Paused` / `Unpaused` (Both navigators)
 
 ```solidity
@@ -801,6 +838,8 @@ const HANDLERS: Record<string, { name: string; handler: EventHandler }> = {
     { name: "NavigatorDeployed", handler: handleNavigatorDeployed },
   [id("Onboard(address,address,uint256,uint256,uint256)")]:
     { name: "Onboard", handler: handleOnboard },
+  [id("NFTClaimed(address,address,uint256,uint256,uint256)")]:
+    { name: "NFTClaimed", handler: handleNFTClaimed },
 
   // Poster events
   [id("NewPost(address,string,string)")]:

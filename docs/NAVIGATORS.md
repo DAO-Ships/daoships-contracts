@@ -520,66 +520,61 @@ function getSchedules(address beneficiary) external view returns (uint256[] memo
 
 ---
 
-#### NFTGatedNavigator (MANAGER)
+#### NFTGatedNavigator (MANAGER) — **SHIPPED**
 
-**What it does:** Gates DAO membership behind NFT ownership (ERC-721 or ERC-1155). Members must hold a specific token to onboard. Supports free-mint (credential = membership) and tribute-required (credential + payment = membership) modes. Ownership checked live on every call -- no allowlist maintenance.
+**What it does:** Gates DAO membership behind ownership of a specific **ERC-721** collection. A holder calls `onboard(tokenId)` and receives a fixed amount of shares/loot. Supports free-mint (credential = membership) and tribute-required (credential + payment = membership) modes. Ownership is checked live — no allowlist maintenance.
 
 **Why DAO Ships needs this:** `mintShares` is permissionless from MANAGER navigators but has no built-in NFT check. The Merkle allowlist on OnboarderNavigator approximates this but requires off-chain tree updates whenever NFTs change hands.
 
-**Why it matters at 1000+ members:** Gaming guilds, creator DAOs, protocol contributor programs, and real-world asset DAOs all use NFTs as credentials. Baking the check into the navigator eliminates continuous allowlist maintenance and makes membership instantly responsive to NFT transfers.
+**Why it matters at 1000+ members:** Gaming guilds, creator DAOs, protocol contributor programs, and real-world asset DAOs all use NFTs as credentials. Baking the check into the navigator eliminates continuous allowlist maintenance.
 
-**Permission:** MANAGER (2). One claim per address (prevents transfer-and-reclaim attacks).
+**Permission:** MANAGER (2).
 
-**Architecture:** On `onboard()`, checks `IERC721(gate).balanceOf(msg.sender) > 0` (or ERC-1155 equivalent). The `mintedTo` mapping tracks addresses (not token IDs) to prevent the transfer-and-reclaim attack. Two modes: free mint (`requireTribute = false`) and tribute required (`requireTribute = true`).
+**Scope — ERC-721 only.** ERC-1155 is intentionally out of scope. ERC-1155's native gating idiom is amount-based (`balanceOf(account, id) >= N`, tiered membership), which is a different feature reserved for a future dedicated navigator (see *Planned: ERC1155GateNavigator* below). Critically, a *fungible* ERC-1155 id has no unique identity to anchor a one-time claim to, and fungibility cannot be reliably detected on-chain (no standard flag; `totalSupply` is optional and spoofable). Restricting to ERC-721 keeps the claim model sound and the audit surface small.
+
+**Claim model — "claim ticket", one claim per `tokenId`, forever.** Claim tracking is per-**token** (`claimed[tokenId]`), not per-address. This defeats the transfer-and-reclaim recycle attack: passing the NFT to a fresh wallet does not unlock a second claim because the *token itself* is spent. Shares are a ticket — once minted they persist even if the NFT is later sold (the buyer of an already-claimed NFT receives nothing; frontends should surface `claimed[tokenId]`). True revocable "lose-NFT-lose-shares" membership is **not** offered here — it is not enforceable for an arbitrary external NFT and is reserved for a future escrow-based navigator.
+
+**Architecture:** Extends `BaseNavigator` (reusing `mintCap`, `perAddressCap`, optional Merkle allowlist, `expiry`, pause, and the mint helper) and implements `IMembershipGate`. On `onboard(tokenId)`: checks pause/expiry/allowlist, verifies `gateToken.ownerOf(tokenId) == msg.sender` (reverts → `NotHolder`), requires `!claimed[tokenId]`, validates tribute, sets `claimed[tokenId]=true`, enforces caps, mints, and forwards tribute to the vault. `mintCap` is **mandatory** (constructor reverts on 0) — an arbitrary gate collection may be mintable, so the cap bounds total dilution. The only untrusted external call is `ownerOf`, guarded by `nonReentrant` + checks-effects-interactions.
+
+**`IMembershipGate`:** stateless eligibility (`isEligible(addr)` → `balanceOf > 0`; `isEligibleToken(addr, id)` → `ownerOf == addr`), separate from claim-tracking, so a future gate-aware navigator family can consult one eligibility source. A `canOnboard(addr, tokenId)` view combines eligibility + claim status + pause + expiry for frontends.
 
 **State variables:**
 
 ```solidity
-DAOShip public immutable daoShip;
-address public immutable gateToken;
-bool public immutable isERC1155;
-uint256 public immutable requiredTokenId;   // ERC-1155 only
+// inherited from BaseNavigator: daoShip, expiry, mintCap, perAddressCap,
+//   allowlistRoot, totalMinted, mintedTo, paused, deployer
+IERC721 public immutable gateToken;
 uint256 public immutable sharesPerHolder;
 uint256 public immutable lootPerHolder;
-bool public immutable requireTribute;
+bool    public immutable requireTribute;
 uint256 public immutable tributeAmount;
-uint256 public immutable mintCap;
-uint256 public immutable expiry;
-uint256 public totalMinted;
-mapping(address => bool) public mintedTo;
-bool public paused;
+mapping(uint256 => bool) public claimed;   // tokenId => spent
 ```
 
 **Key functions:**
 
 ```solidity
-function onboard() external payable nonReentrant;
-function pause() external;
-function unpause() external;
+function onboard(uint256 tokenId) external payable nonReentrant;
+function onboard(uint256 tokenId, bytes32[] calldata proof) external payable nonReentrant;
+function isEligible(address candidate) external view returns (bool);
+function isEligibleToken(address candidate, uint256 tokenId) external view returns (bool);
+function canOnboard(address candidate, uint256 tokenId) external view returns (bool);
+// pause()/unpause() inherited (GOVERNOR navigator or avatar)
 ```
 
-- `onboard` -- checks pause, expiry, not already claimed, NFT ownership, tribute (if required), mint cap. Mints shares and/or loot.
-- No perAddressCap needed (each address can only claim once).
-- ERC-721: `balanceOf > 0` (any token in collection). ERC-1155: `balanceOf(account, tokenId) > 0` (specific ID).
+**Events:** `Onboard` (base, for onboarding feeds), `NFTClaimed(daoShipAddress, holder, tokenId, shares, loot)` (adds the tokenId dimension for claim-status indexing), `Paused`, `Unpaused`, `NavigatorDeployed`.
 
-**Events:** `Onboard`, `Paused`, `Unpaused`.
+**Custom errors:** `NotHolder`, `AlreadyClaimed`, `IncorrectTribute`, `NoTributeRequired`, `TransferFailed` (+ inherited `IsPaused`, `Expired`, `MintCapExceeded`, `PerAddressCapExceeded`, `NotAllowlisted`, `NotAuthorized`, `InvalidConfig`).
 
-**Custom errors:** `IsPaused`, `Expired`, `AlreadyClaimed`, `NotHolder`, `IncorrectTribute`, `NoTributeRequired`, `TransferFailed`, `MintCapExceeded`, `NotAuthorized`, `InvalidConfig`.
+**Tests:** `test/unit/NFTGatedNavigator.test.ts` — 27 passing. Covers happy path, loot-only, `NotHolder` (wrong/nonexistent/burned token), `AlreadyClaimed`, the transfer-and-reclaim defense, tribute modes, mint/per-address caps, expiry, pause auth, constructor validation, and the `IMembershipGate`/`canOnboard` views.
 
-**Test scenarios:**
+**Status:** Shipped. Contract `contracts/navigators/NFTGatedNavigator.sol` (~210 lines incl. NatSpec), interface `contracts/interfaces/IMembershipGate.sol`, deploy script `scripts/deploy/005_deploy_nft_gated_navigator.ts`.
 
-1. ERC-721 happy path: mint NFT, onboard, verify shares received
-2. ERC-1155 happy path with specific tokenId
-3. Revert: no NFT -> `NotHolder`
-4. Revert: already claimed -> `AlreadyClaimed`
-5. NFT transfer: alice onboards, transfers NFT to bob, bob onboards (succeeds), alice cannot re-onboard
-6. Tribute required: correct amount succeeds, wrong amount reverts
-7. Free mint: 0 value succeeds, nonzero value reverts `NoTributeRequired`
-8. Mint cap: cap=2, third onboard reverts
-9. Expiry: past expiry reverts
-10. Pause/unpause
+---
 
-**Estimated size:** ~140 lines of Solidity.
+#### ERC1155GateNavigator (MANAGER) — *Planned*
+
+A dedicated companion to NFTGatedNavigator for ERC-1155 credentials, done in the standard's native idiom rather than crippled to supply-1. Amount-aware gating (`balanceOf(account, id) >= threshold`), optional quantity-scaled shares (more units → more shares, within caps), and tiered membership by id. Would consult the same `IMembershipGate` abstraction. Anti-recycle for fungible ids requires either escrow (lock the units) or DAO-controlled/soulbound tokens — to be specified when there is concrete demand.
 
 ---
 
@@ -807,7 +802,7 @@ function isDelinquent(address member) external view returns (bool);
 | SubscriptionNavigator | -- | -- | -- | Useful | -- | **Not built** |
 | OracleNavigator | -- | -- | -- | -- | Useful | **Not built** |
 | CircuitBreakerNavigator | -- | -- | Useful | Useful | Critical | **Not built** |
-| NFTGatedNavigator | Useful | Useful | Useful | -- | -- | **Not built** |
+| NFTGatedNavigator | Useful | Useful | Useful | -- | -- | **Shipped** |
 
 ---
 
@@ -825,7 +820,7 @@ function isDelinquent(address member) external view returns (bool);
 | CircuitBreakerNavigator | ADMIN (1) | `setAdminConfig` | No | ~170 |
 | OracleNavigator | GOVERNOR (4) | `setGovernanceConfig` | No | ~180 |
 | SubscriptionNavigator | MANAGER (2) | `burnShares`, `mintLoot` | No | ~190 |
-| NFTGatedNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | ~140 |
+| NFTGatedNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | Shipped |
 
 **Total planned: ~1,540 lines of Solidity** across 9 contracts, plus test suites.
 

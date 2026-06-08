@@ -160,6 +160,123 @@ async function waitForBlockTimestamp(
   }
 }
 
+// ProposalState enum (DAOShip.sol:225) — numeric values returned by daoShip.state().
+const PROPOSAL_STATE = [
+  "Unborn", "Submitted", "Voting", "Cancelled",
+  "Grace", "Ready", "Processed", "Defeated", "Expired",
+];
+const STATE_SUBMITTED = 1;
+const STATE_VOTING = 2;
+const STATE_GRACE = 4;
+
+/**
+ * Wait until a proposal is open for voting, gating on the CONTRACT's own clock.
+ *
+ * daoShip.state() evaluates the EVM block.timestamp — the exact clock submitVote
+ * enforces — whereas the previous implementation polled block.woHeader.timestamp.
+ * On Quai the work-object header timestamp can run ahead of the EVM timestamp, so
+ * the old guard could report "voting open" while the EVM still saw a different
+ * phase, letting votes land outside the window. Polling state() removes that skew.
+ *
+ * Resolves once state()==Voting and at least one further block has been mined (so the
+ * vote tx executes strictly after votingStarts and getPriorVotes(voter, votingStarts)
+ * is determined). Throws loudly if the proposal has already advanced past Voting —
+ * an overshot window (PoW block-time variance vs. a short VOTING_PERIOD) must fail
+ * visibly rather than silently skip the vote.
+ */
+async function waitPastVotingStarts(
+  provider: quais.JsonRpcProvider,
+  daoShip: any,
+  proposalId: any,
+  label: string = "votingStarts",
+  maxWaitMs: number = 180000
+): Promise<void> {
+  const prop = await daoShip.proposals(proposalId);
+  const votingStarts = Number(prop.votingStarts);
+  if (votingStarts === 0) {
+    throw new Error(`Proposal ${proposalId} is not sponsored (votingStarts==0) — cannot open voting`);
+  }
+
+  const deadline = Date.now() + maxWaitMs;
+  while (true) {
+    const s = Number(await daoShip.state(proposalId));
+
+    if (s === STATE_VOTING) {
+      // Ensure a block is mined after we observe Voting, so the vote tx lands
+      // strictly after votingStarts (share checkpoint determinedness), then
+      // re-confirm the window is still open before returning.
+      const seenAt = await provider.getBlockNumber(Shard.Cyprus1);
+      while ((await provider.getBlockNumber(Shard.Cyprus1)) <= seenAt) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
+      const recheck = Number(await daoShip.state(proposalId));
+      if (recheck === STATE_VOTING) {
+        console.log(`   ✅ Proposal ${proposalId} open for voting (state=Voting, block >${seenAt}, ${label}=${votingStarts})`);
+        return;
+      }
+      if (recheck !== STATE_SUBMITTED) {
+        throw new Error(
+          `Proposal ${proposalId} left Voting (state=${PROPOSAL_STATE[recheck] ?? recheck}) while confirming the ` +
+          `window — VOTING_PERIOD (${process.env.VOTING_PERIOD || "unset"}s) is too short for PoW block-time variance.`
+        );
+      }
+      // recheck === Submitted: re-sponsor race, fall through and keep polling.
+    } else if (s !== STATE_SUBMITTED) {
+      // Grace / Ready / Defeated / Expired / Cancelled / Processed — the voting
+      // window closed before a vote could be cast.
+      throw new Error(
+        `Proposal ${proposalId} left Voting before a vote could be cast (state=${PROPOSAL_STATE[s] ?? s}). ` +
+        `The voting window was overshot — VOTING_PERIOD (${process.env.VOTING_PERIOD || "unset"}s) is too short ` +
+        `for PoW block-time variance.`
+      );
+    }
+
+    if (Date.now() > deadline) {
+      throw new Error(
+        `Timed out after ${maxWaitMs / 1000}s waiting for proposal ${proposalId} to open for voting ` +
+        `(last state=${PROPOSAL_STATE[s] ?? s})`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+  }
+}
+
+/**
+ * Wait until a proposal has left the voting+grace window, gating on the CONTRACT's
+ * own clock.
+ *
+ * daoShip.state() evaluates the EVM block.timestamp — the same clock processProposal's
+ * Ready/Defeated check uses — whereas the previous implementation polled
+ * block.woHeader.timestamp. The woHeader-vs-EVM skew let processProposal fire while the
+ * proposal was still in Grace (NotReady) and made state() reads flap between Grace and
+ * Defeated. Polling state() directly removes that skew.
+ *
+ * Returns the terminal pre-process state (Ready / Defeated / Expired / …) so callers
+ * can assert on it. `provider` is retained for signature compatibility.
+ */
+async function waitUntilGraceEnded(
+  provider: quais.JsonRpcProvider,
+  daoShip: any,
+  proposalId: any,
+  maxWaitMs: number = 300000
+): Promise<number> {
+  const deadline = Date.now() + maxWaitMs;
+  while (true) {
+    const s = Number(await daoShip.state(proposalId));
+    if (s !== STATE_VOTING && s !== STATE_GRACE && s !== STATE_SUBMITTED) {
+      console.log(`   ✅ Proposal ${proposalId} past grace (state=${PROPOSAL_STATE[s] ?? s})`);
+      return s;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(
+        `Timed out after ${maxWaitMs / 1000}s waiting for proposal ${proposalId} to pass grace ` +
+        `(still state=${PROPOSAL_STATE[s] ?? s})`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+}
+
 /**
  * Complete On-Chain DAO Lifecycle E2E Test + COMPREHENSIVE Event Coverage
  *
@@ -217,7 +334,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   const votingPeriodSec = parseInt(process.env.VOTING_PERIOD || "3600");
   const gracePeriodSec = parseInt(process.env.GRACE_PERIOD || "60");
   const perProposalMs = (votingPeriodSec + gracePeriodSec + 50) * 1000;
-  const baseOverheadMs = 360000; // 6 minutes: salt mining, deployments, Phase 2b ERC20 onboarding
+  const baseOverheadMs = 420000; // 7 minutes: salt mining, deployments, Phase 2b ERC20 + Phase 2d NFT onboarding
   const dynamicTimeout = (4 * perProposalMs) + baseOverheadMs;
   this.timeout(dynamicTimeout);
 
@@ -235,6 +352,8 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   let vault: string; // Vault address (string, not Contract)
   let onboarderNavigator: quais.Contract;
   let erc20TributeNavigator: quais.Contract;
+  let nftGatedNavigator: quais.Contract;
+  let nftGateToken: quais.Contract; // MockERC721 gate collection
   let tributeToken: quais.Contract;
 
   // ABIs
@@ -244,6 +363,8 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   let DAOShipAndVaultLauncherABI: any;
   let OnboarderNavigatorABI: any;
   let ERC20TributeNavigatorABI: any;
+  let NFTGatedNavigatorABI: any;
+  let MockERC721ABI: any;
   let MockERC20ABI: any;
 
   // QuaiVault artifacts for salt mining
@@ -395,6 +516,15 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
         path.join(artifactsDir, "navigators/ERC20TributeNavigator.sol/ERC20TributeNavigator.json"),
         "utf-8"
       )
+    ).abi;
+    NFTGatedNavigatorABI = JSON.parse(
+      fs.readFileSync(
+        path.join(artifactsDir, "navigators/NFTGatedNavigator.sol/NFTGatedNavigator.json"),
+        "utf-8"
+      )
+    ).abi;
+    MockERC721ABI = JSON.parse(
+      fs.readFileSync(path.join(artifactsDir, "test/MockERC721.sol/MockERC721.json"), "utf-8")
     ).abi;
     MockERC20ABI = JSON.parse(
       fs.readFileSync(
@@ -674,6 +804,59 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
 
     erc20TributeNavigator = erc20TributeNavigatorInstance;
 
+    // Deploy MockERC721 gate collection and NFTGatedNavigator for Phase 2d
+    console.log("   Deploying MockERC721 gate collection...");
+    const MockERC721Json = JSON.parse(
+      fs.readFileSync(
+        path.join(__dirname, "../../../artifacts/contracts/test/MockERC721.sol/MockERC721.json"),
+        "utf-8"
+      )
+    );
+    const mockErc721IpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(MockERC721Json.bytecode);
+    const MockERC721Factory = new quais.ContractFactory(MockERC721ABI, MockERC721Json.bytecode, deployer, mockErc721IpfsHash);
+    const nftGateTokenInstance = await MockERC721Factory.deploy();
+    await nftGateTokenInstance.waitForDeployment();
+    const nftGateTokenAddress = await nftGateTokenInstance.getAddress();
+    console.log(`   ✅ MockERC721 (gate): ${nftGateTokenAddress}`);
+    nftGateToken = nftGateTokenInstance;
+
+    console.log("   Deploying NFTGatedNavigator...");
+    const NFTGatedNavigatorJson = JSON.parse(
+      fs.readFileSync(
+        path.join(__dirname, "../../../artifacts/contracts/navigators/NFTGatedNavigator.sol/NFTGatedNavigator.json"),
+        "utf-8"
+      )
+    );
+    const nftGatedIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(NFTGatedNavigatorJson.bytecode);
+    const NFTGatedNavigatorFactory = new quais.ContractFactory(
+      NFTGatedNavigatorABI,
+      NFTGatedNavigatorJson.bytecode,
+      deployer,
+      nftGatedIpfsHash
+    );
+    // NFTGatedNavigator constructor: daoShip, gateToken, sharesPerHolder, lootPerHolder,
+    // requireTribute, tributeAmount, expiry, mintCap, perAddressCap, allowlistRoot, name, description
+    // Free-mint: 10 shares per held NFT, no loot, mandatory mintCap (1000), open allowlist
+    const nftSharesPerHolder = quais.parseQuai("10");
+    const nftGatedNavigatorInstance = await NFTGatedNavigatorFactory.deploy(
+      predictedDAOShipAddress,
+      nftGateTokenAddress,
+      nftSharesPerHolder,
+      0n,             // lootPerHolder (not offered)
+      false,          // requireTribute (free mint)
+      0n,             // tributeAmount
+      0n,             // expiry (no expiry)
+      quais.parseQuai("1000"), // mintCap (mandatory dilution backstop)
+      0n,             // perAddressCap (unlimited)
+      quais.ZeroHash, // allowlistRoot (open)
+      "NFT Gate",                 // name
+      "10 shares per held NFT"    // description
+    );
+    await nftGatedNavigatorInstance.waitForDeployment();
+    const nftGatedNavigatorAddress = await nftGatedNavigatorInstance.getAddress();
+    console.log(`   ✅ NFTGatedNavigator: ${nftGatedNavigatorAddress}\n`);
+    nftGatedNavigator = nftGatedNavigatorInstance;
+
     // Configuration from .env.e2e
     const votingPeriod = parseInt(process.env.VOTING_PERIOD || "3600"); // 1 hour minimum (M-7 fix)
     const gracePeriod = parseInt(process.env.GRACE_PERIOD || "60");
@@ -682,9 +865,16 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     const sponsorThreshold = quais.parseQuai(process.env.SPONSOR_THRESHOLD || "1");
     const minRetentionPercent = parseInt(process.env.MIN_RETENTION_PERCENT || "6600");
 
+    // Explicit auto-expiry window (1 day). With defaultExpiryWindow=0 the contract falls back to
+    // 2*(votingPeriod+gracePeriod); on a small votingPeriod that window is short enough that this
+    // suite's own wall-clock overhead (votingStarts poll + 2 vote txs + grace poll) can auto-expire
+    // a proposal before processProposal on slow PoW blocks (surfaces as NotReady). A generous fixed
+    // window removes that race; the whole suite runs well under a day.
+    const defaultExpiryWindow = 86400;
+
     const governanceConfig = quais.AbiCoder.defaultAbiCoder().encode(
       ["uint32", "uint32", "uint256", "uint256", "uint256", "uint256", "uint32"],
-      [votingPeriod, gracePeriod, proposalOffering, quorumPercent, sponsorThreshold, minRetentionPercent, 0]
+      [votingPeriod, gracePeriod, proposalOffering, quorumPercent, sponsorThreshold, minRetentionPercent, defaultExpiryWindow]
     );
 
     // Initial members and navigators
@@ -697,9 +887,10 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     const navigators: string[] = [
       onboarderNavigatorAddress,
       erc20TributeNavigatorAddress, // ERC20TributeNavigator for Phase 2b
+      nftGatedNavigatorAddress,     // NFTGatedNavigator for Phase 2d
       deployer.address  // Deployer as MANAGER for direct mint operations
     ];
-    const navigatorPermissions: number[] = [2, 2, 2]; // MANAGER = 2
+    const navigatorPermissions: number[] = [2, 2, 2, 2]; // MANAGER = 2
 
     // Encode initialization params (must match DAOShip.setUp() signature)
     const initializationParams = quais.AbiCoder.defaultAbiCoder().encode(
@@ -1047,6 +1238,52 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log(`\n✅ onboardWithPermit working correctly on-chain (single tx, no approve)\n`);
   });
 
+  it("Should onboard Carol via NFTGatedNavigator (NFT claim)", async function () {
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("PHASE 2d: Carol Onboards (NFTGatedNavigator)");
+    console.log("═══════════════════════════════════════════════════════════\n");
+
+    const tokenId = 1n;
+
+    // Mint a gate NFT to Carol, then claim membership with it (free mint)
+    const mintNftTx = await nftGateToken.mint(carol.address, tokenId);
+    await mintNftTx.wait();
+    console.log(`   ✅ Minted gate NFT #${tokenId} to Carol`);
+
+    const sharesPerHolder = await nftGatedNavigator.sharesPerHolder();
+    const carolSharesBefore = await shares.balanceOf(carol.address);
+
+    const tx = await nftGatedNavigator.connect(carol)["onboard(uint256)"](tokenId);
+    const receipt = await tx.wait();
+    console.log(`   ✅ Onboard tx: ${receipt.hash}`);
+
+    // Verify the NFTClaimed event (carries the tokenId dimension Onboard cannot)
+    let nftClaimedFound = false;
+    for (const log of receipt.logs) {
+      try {
+        const parsed = nftGatedNavigator.interface.parseLog(log);
+        if (parsed && parsed.name === "NFTClaimed") {
+          nftClaimedFound = true;
+          expect(parsed.args.tokenId).to.equal(tokenId);
+          expect(parsed.args.shares).to.equal(sharesPerHolder);
+        }
+      } catch {
+        // not an NFTGatedNavigator event — skip
+      }
+    }
+    expect(nftClaimedFound, "NFTClaimed event should be emitted").to.equal(true);
+
+    // Verify shares minted and the tokenId is now permanently spent
+    const carolSharesAfter = await shares.balanceOf(carol.address);
+    expect(carolSharesAfter).to.equal(carolSharesBefore + sharesPerHolder);
+    expect(await nftGatedNavigator.claimed(tokenId)).to.equal(true);
+
+    console.log(`   Carol shares: ${quais.formatQuai(carolSharesBefore)} → ${quais.formatQuai(carolSharesAfter)}`);
+    console.log(`   (+${quais.formatQuai(carolSharesAfter - carolSharesBefore)} shares via NFT gate)`);
+    console.log(`   claimed(#${tokenId}) = true (one claim per tokenId, forever)`);
+    console.log(`\n✅ NFTGatedNavigator onboarding working on-chain (claim ticket per tokenId)\n`);
+  });
+
   it("Should submit, vote, and process funding proposal", async function () {
     console.log("═══════════════════════════════════════════════════════════");
     console.log("PHASE 4: Submit, Vote & Process Proposal");
@@ -1127,22 +1364,12 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     const proposalId = parsedEvent?.args[0];
     console.log(`Proposal ID: ${proposalId}\n`);
 
-    // Wait for block.timestamp to advance past votingStarts
-    // DAOShipVotes.getPriorVotes requires timepoint < block.timestamp (strict)
-    // estimateGas simulates against the latest block, so we need at least one
-    // additional block AFTER the timestamp passes votingStarts to be safe.
-    {
-      const prop = await daoShip.proposals(proposalId);
-      const votingStarts = Number(prop.votingStarts);
-      console.log("Waiting for block timestamp to pass votingStarts...");
-      await waitForBlockTimestamp(provider, votingStarts + 10, "votingStarts+10s margin");
-      // Wait for one more block to ensure estimateGas uses updated state
-      const afterBlock = await provider.getBlockNumber(Shard.Cyprus1);
-      while ((await provider.getBlockNumber(Shard.Cyprus1)) <= afterBlock) {
-        await new Promise(resolve => setTimeout(resolve, 3000));
-      }
-      console.log("Checkpoint verified.\n");
-    }
+    // Gate on the contract's own clock (state()==Voting), the same clock submitVote
+    // enforces, rather than the work-object header timestamp — and fail loudly if the
+    // voting window was overshot. See waitPastVotingStarts.
+    console.log("Waiting for voting window to open...");
+    await waitPastVotingStarts(provider, daoShip, proposalId, "votingStarts");
+    console.log("Checkpoint verified.\n");
 
     // Vote YES
     console.log("Voting...");
@@ -1185,6 +1412,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log(`   Quorum required: ${quorumRequired} (${quorumPercent / 100n}% of ${proposal.maxTotalSharesAtSponsor})`);
     console.log(`   Quorum met: ${proposal.yesBalance >= quorumRequired}`);
 
+    await waitUntilGraceEnded(provider, daoShip, proposalId);
     const processTx = await daoShip.connect(deployer).processProposal(proposalId, proposalData);
     console.log(`   Process TX: ${processTx.hash}`);
     const processReceipt = await processTx.wait();
@@ -1294,10 +1522,11 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     const proposalId = parsedEvent?.args[0];
     console.log(`Proposal ID: ${proposalId}\n`);
 
-    // Wait for checkpoints
-    // Must wait long enough so block.timestamp > votingStarts (DAOShipVotes requires timepoint < block.timestamp)
-    console.log("Waiting for checkpoints...");
-    await new Promise((resolve) => setTimeout(resolve, 30000)); // Wait 30 seconds for block advancement (Quai ~10s blocks)
+    // Wait until block.timestamp strictly passes votingStarts. A fixed sleep races the PoW
+    // block clock and intermittently reverts submitVote with "DAOShipVotes: not yet determined";
+    // poll the chain clock against the proposal's votingStarts instead (mirrors the funding phase).
+    console.log("Waiting for votingStarts to pass...");
+    await waitPastVotingStarts(provider, daoShip, proposalId, "votingStarts");
     console.log("Checkpoint wait complete.\n");
 
     // Vote
@@ -1324,6 +1553,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log("Processing navigator update proposal...");
     await provider.getBlockNumber(Shard.Cyprus1);
 
+    await waitUntilGraceEnded(provider, daoShip, proposalId);
     const processTx = await daoShip.connect(deployer).processProposal(proposalId, proposalData);
     console.log(`   Process TX: ${processTx.hash}`);
     const processReceipt = await processTx.wait();
@@ -1554,10 +1784,11 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     const proposalId = parsedEvent?.args[0];
     console.log(`Proposal ID: ${proposalId}\n`);
 
-    // Wait for checkpoints
-    // Must wait long enough so block.timestamp > votingStarts (DAOShipVotes requires timepoint < block.timestamp)
-    console.log("Waiting for checkpoints...");
-    await new Promise((resolve) => setTimeout(resolve, 30000)); // Wait 30 seconds for block advancement (Quai ~10s blocks)
+    // Wait until block.timestamp strictly passes votingStarts. A fixed sleep races the PoW
+    // block clock and intermittently reverts submitVote with "DAOShipVotes: not yet determined";
+    // poll the chain clock against the proposal's votingStarts instead (mirrors the funding phase).
+    console.log("Waiting for votingStarts to pass...");
+    await waitPastVotingStarts(provider, daoShip, proposalId, "votingStarts");
     console.log("Checkpoint wait complete.\n");
 
     // Vote
@@ -1584,6 +1815,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log("Processing navigator removal proposal...");
     await provider.getBlockNumber(Shard.Cyprus1);
 
+    await waitUntilGraceEnded(provider, daoShip, proposalId);
     const processTx = await daoShip.connect(deployer).processProposal(proposalId, proposalData);
     console.log(`   Process TX: ${processTx.hash}`);
     const processReceipt = await processTx.wait();
@@ -1693,8 +1925,8 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
         1500,  // quorum 15% (changed from 20%)
         quais.parseQuai("1"),  // sponsor threshold (unchanged)
         6600,  // min retention (unchanged)
-        0      // defaultExpiryWindow (0 = fallback 2*(voting+grace))
-      ]
+        86400  // defaultExpiryWindow (1 day) — keep generous so later proposals can't auto-expire
+      ]                       //   from suite wall-clock overhead on slow blocks (see Phase 1 note)
     );
 
     const setGovernanceConfigData = daoShip.interface.encodeFunctionData("setGovernanceConfig", [
@@ -1781,10 +2013,11 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     const proposalId = parsedEvent?.args[0];
     console.log(`Proposal ID: ${proposalId}\n`);
 
-    // Wait for checkpoints
-    // Must wait long enough so block.timestamp > votingStarts (DAOShipVotes requires timepoint < block.timestamp)
-    console.log("Waiting for checkpoints...");
-    await new Promise((resolve) => setTimeout(resolve, 30000)); // Wait 30 seconds for block advancement (Quai ~10s blocks)
+    // Wait until block.timestamp strictly passes votingStarts. A fixed sleep races the PoW
+    // block clock and intermittently reverts submitVote with "DAOShipVotes: not yet determined";
+    // poll the chain clock against the proposal's votingStarts instead (mirrors the funding phase).
+    console.log("Waiting for votingStarts to pass...");
+    await waitPastVotingStarts(provider, daoShip, proposalId, "votingStarts");
     console.log("Checkpoint wait complete.\n");
 
     // Vote
@@ -1809,6 +2042,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log("Processing batched governance proposal...");
     await provider.getBlockNumber(Shard.Cyprus1);
 
+    await waitUntilGraceEnded(provider, daoShip, proposalId);
     const processTx = await daoShip.connect(deployer).processProposal(proposalId, proposalData);
     console.log(`   Process TX: ${processTx.hash}`);
     const processReceipt = await processTx.wait();
@@ -2123,6 +2357,10 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     const totalWait = Number(vp) + Number(gp) + 30;
     console.log(`   Waiting ${totalWait}s for voting + grace period...`);
     await new Promise((resolve) => setTimeout(resolve, totalWait * 1000));
+    // Confirm against the chain clock that grace has actually ended before asserting terminal
+    // state — the wall-clock sleep can finish a few seconds before graceEnds on slow PoW blocks,
+    // which would read Grace(4) instead of Defeated(7).
+    await waitUntilGraceEnded(provider, daoShip, proposalId);
 
     // Check state is Defeated (auto-defeat: no votes means yesBalance=0, noBalance=0 → 0 > 0 = false)
     const stateBeforeProcess = await daoShip.state(proposalId);
@@ -2173,8 +2411,9 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log("   ✅ BurnLoot (Phase 8)");
     console.log("\n   Exit Mechanism (1/1):");
     console.log("   ✅ Ragequit (Phase 13)");
-    console.log("\n   Navigator Events (1/1):");
-    console.log("   ✅ Onboard (Phases 2, 2b, 2c, 3)");
+    console.log("\n   Navigator Events (2/2):");
+    console.log("   ✅ Onboard (Phases 2, 2b, 2c, 2d, 3)");
+    console.log("   ✅ NFTClaimed (Phase 2d, NFTGatedNavigator)");
     console.log("\n   Setup (1/1):");
     console.log("   ✅ SetupComplete (Phase 1)");
     console.log("\n   Admin Operations (1/1):");
