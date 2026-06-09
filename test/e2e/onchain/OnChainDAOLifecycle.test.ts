@@ -11,6 +11,26 @@ import hre from "hardhat";
 dotenv.config({ path: path.join(__dirname, "../../../.env.e2e") });
 
 /**
+ * Push contract metadata to IPFS, retrying on the placeholder/empty CID that
+ * @quai/hardhat-deploy-metadata returns when an IPFS pin transiently fails (often
+ * a throttle after several rapid pushes). The failure surfaces downstream as a
+ * factory deploy throwing `IPFSHash is ... not 46 characters long`. A valid CID is
+ * exactly 46 chars; we retry until we get one rather than deploy with a bad hash.
+ */
+async function pushMetadataWithRetry(bytecode: string, label: string, tries = 6): Promise<string> {
+  for (let i = 0; i < tries; i++) {
+    const hash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(bytecode);
+    if (typeof hash === "string" && hash.length === 46) return hash;
+    console.log(`   ⏳ IPFS metadata push for ${label} returned "${hash}" (attempt ${i + 1}/${tries}); retrying in 4s...`);
+    await new Promise((r) => setTimeout(r, 4000));
+  }
+  throw new Error(
+    `IPFS metadata push for ${label} never returned a valid 46-char CID after ${tries} attempts — ` +
+    `this is an IPFS pinning issue in @quai/hardhat-deploy-metadata, not a contract problem.`
+  );
+}
+
+/**
  * Helper: Encode MultiSend transaction data
  *
  * MultiSend format (packed):
@@ -137,25 +157,35 @@ async function waitForPendingTransactions(
  * Polls every 5 seconds and verifies on-chain time has advanced.
  * This replaces blind sleeps for checkpoint waits.
  */
-async function waitForBlockTimestamp(
-  provider: quais.JsonRpcProvider,
-  targetTimestamp: number,
-  label: string = "target",
-  maxWaitMs: number = 120000
+/**
+ * Wait until an on-chain predicate evaluated against the CONTRACT's own clock
+ * becomes true — i.e. poll a contract view, which the node evaluates at the EVM
+ * block.timestamp, rather than gating on block.woHeader.timestamp.
+ *
+ * The work-object header timestamp runs AHEAD of the EVM block.timestamp on Quai
+ * (the same skew documented on waitPastVotingStarts). The previous helper waited
+ * for woHeader.timestamp to pass a target, so it returned before the EVM clock the
+ * contract actually reads had advanced — leaving a timelock change still
+ * ChangeNotReady (isExecutable == false) and a vesting schedule only partially
+ * vested at the exact moment the helper claimed the deadline had passed. Polling a
+ * contract view (isExecutable / vested) removes that skew because the view sees the
+ * same block.timestamp the state-changing call will.
+ */
+async function waitForContractClock(
+  predicate: () => Promise<boolean>,
+  label: string = "condition",
+  maxWaitMs: number = 300000
 ): Promise<void> {
-  const startTime = Date.now();
+  const deadline = Date.now() + maxWaitMs;
   while (true) {
-    const blockNumber = await provider.getBlockNumber(Shard.Cyprus1);
-    const block = await provider.getBlock(Shard.Cyprus1, blockNumber);
-    const blockTime = Number(block?.woHeader?.timestamp ?? 0);
-    if (blockTime > targetTimestamp) {
-      console.log(`   ✅ Block ${blockNumber} timestamp ${blockTime} > ${label} ${targetTimestamp}`);
+    if (await predicate()) {
+      console.log(`   ✅ ${label} satisfied (contract clock)`);
       return;
     }
-    if (Date.now() - startTime > maxWaitMs) {
-      throw new Error(`Timed out waiting for block timestamp to pass ${label} ${targetTimestamp} (current: ${blockTime})`);
+    if (Date.now() > deadline) {
+      throw new Error(`Timed out after ${maxWaitMs / 1000}s waiting for ${label} (contract clock)`);
     }
-    console.log(`   ⏳ Block ${blockNumber} timestamp ${blockTime} <= ${label} ${targetTimestamp}, waiting...`);
+    console.log(`   ⏳ ${label} not yet satisfied, waiting...`);
     await new Promise((resolve) => setTimeout(resolve, 5000));
   }
 }
@@ -329,13 +359,19 @@ async function waitUntilGraceEnded(
  */
 
 describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
-  // Dynamic timeout: 4 proposals × (voting + grace + 20s checkpoint + 30s buffer) + 5min base overhead
+  // Dynamic timeout: 5 governance proposals × (voting + grace + 20s checkpoint + 30s buffer) + base overhead
   // Phase 2b (ERC20TributeNavigator) adds no governance proposals — overhead only
   const votingPeriodSec = parseInt(process.env.VOTING_PERIOD || "3600");
   const gracePeriodSec = parseInt(process.env.GRACE_PERIOD || "60");
   const perProposalMs = (votingPeriodSec + gracePeriodSec + 50) * 1000;
-  const baseOverheadMs = 420000; // 7 minutes: salt mining, deployments, Phase 2b ERC20 + Phase 2d NFT onboarding
-  const dynamicTimeout = (4 * perProposalMs) + baseOverheadMs;
+  // 7 min base (salt mining, deployments, Phase 2b ERC20 + Phase 2d NFT onboarding)
+  // + 3 min for the Phase 2f VestingNavigator deploy and its ~120s on-chain vest wait.
+  const baseOverheadMs = 420000 + 180000;
+  // Phase 2g (TimelockNavigator) waits the real MIN_DELAY (10 min) on-chain after its queue
+  // proposal. Budget delay*3 + 300s to match the waitForContractClock budget in that test —
+  // the EVM clock lags real time on Orchard, so advancing it 600s can take well over 600s.
+  const timelockDelayWaitMs = (600 * 3 + 300) * 1000;
+  const dynamicTimeout = (5 * perProposalMs) + baseOverheadMs + timelockDelayWaitMs;
   this.timeout(dynamicTimeout);
 
   let provider: quais.JsonRpcProvider;
@@ -354,6 +390,8 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   let erc20TributeNavigator: quais.Contract;
   let nftGatedNavigator: quais.Contract;
   let signalNavigator: quais.Contract; // no-permission, non-binding polls
+  let vestingNavigator: quais.Contract; // MANAGER, cliff+linear vesting
+  let timelockNavigator: quais.Contract; // GOVERNOR, delayed governance-config changes
   let nftGateToken: quais.Contract; // MockERC721 gate collection
   let tributeToken: quais.Contract;
 
@@ -366,6 +404,8 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   let ERC20TributeNavigatorABI: any;
   let NFTGatedNavigatorABI: any;
   let SignalNavigatorABI: any;
+  let VestingNavigatorABI: any;
+  let TimelockNavigatorABI: any;
   let MockERC721ABI: any;
   let MockERC20ABI: any;
 
@@ -528,6 +568,18 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     SignalNavigatorABI = JSON.parse(
       fs.readFileSync(
         path.join(artifactsDir, "navigators/SignalNavigator.sol/SignalNavigator.json"),
+        "utf-8"
+      )
+    ).abi;
+    VestingNavigatorABI = JSON.parse(
+      fs.readFileSync(
+        path.join(artifactsDir, "navigators/VestingNavigator.sol/VestingNavigator.json"),
+        "utf-8"
+      )
+    ).abi;
+    TimelockNavigatorABI = JSON.parse(
+      fs.readFileSync(
+        path.join(artifactsDir, "navigators/TimelockNavigator.sol/TimelockNavigator.json"),
         "utf-8"
       )
     ).abi;
@@ -710,9 +762,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     );
 
     console.log("   Generating IPFS metadata hashes...");
-    const onboarderIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(
-      OnboarderNavigatorJson.bytecode
-    );
+    const onboarderIpfsHash = await pushMetadataWithRetry(OnboarderNavigatorJson.bytecode, "OnboarderNavigator");
 
     console.log("   Deploying OnboarderNavigator...");
     const OnboarderNavigatorFactory = new quais.ContractFactory(
@@ -755,9 +805,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
         "utf-8"
       )
     );
-    const mockErc20IpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(
-      MockERC20PermitJson.bytecode
-    );
+    const mockErc20IpfsHash = await pushMetadataWithRetry(MockERC20PermitJson.bytecode, "MockERC20Permit");
     const MockERC20Factory = new quais.ContractFactory(MockERC20ABI, MockERC20PermitJson.bytecode, deployer, mockErc20IpfsHash);
     const tributeTokenInstance = await MockERC20Factory.deploy("Test USDC", "USDC");
     await tributeTokenInstance.waitForDeployment();
@@ -781,9 +829,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
         "utf-8"
       )
     );
-    const erc20TributeIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(
-      ERC20TributeNavigatorJson.bytecode
-    );
+    const erc20TributeIpfsHash = await pushMetadataWithRetry(ERC20TributeNavigatorJson.bytecode, "ERC20TributeNavigator");
     const ERC20TributeNavigatorFactory = new quais.ContractFactory(
       ERC20TributeNavigatorABI,
       ERC20TributeNavigatorJson.bytecode,
@@ -820,7 +866,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
         "utf-8"
       )
     );
-    const mockErc721IpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(MockERC721Json.bytecode);
+    const mockErc721IpfsHash = await pushMetadataWithRetry(MockERC721Json.bytecode, "MockERC721");
     const MockERC721Factory = new quais.ContractFactory(MockERC721ABI, MockERC721Json.bytecode, deployer, mockErc721IpfsHash);
     const nftGateTokenInstance = await MockERC721Factory.deploy();
     await nftGateTokenInstance.waitForDeployment();
@@ -835,7 +881,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
         "utf-8"
       )
     );
-    const nftGatedIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(NFTGatedNavigatorJson.bytecode);
+    const nftGatedIpfsHash = await pushMetadataWithRetry(NFTGatedNavigatorJson.bytecode, "NFTGatedNavigator");
     const NFTGatedNavigatorFactory = new quais.ContractFactory(
       NFTGatedNavigatorABI,
       NFTGatedNavigatorJson.bytecode,
@@ -875,7 +921,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
         "utf-8"
       )
     );
-    const signalIpfsHash = await hre.deployMetadata.pushMetadataToIPFSWithBytecode(SignalNavigatorJson.bytecode);
+    const signalIpfsHash = await pushMetadataWithRetry(SignalNavigatorJson.bytecode, "SignalNavigator");
     const SignalNavigatorFactory = new quais.ContractFactory(
       SignalNavigatorABI,
       SignalNavigatorJson.bytecode,
@@ -902,6 +948,67 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     const signalNavigatorAddress = await signalNavigatorInstance.getAddress();
     console.log(`   ✅ SignalNavigator: ${signalNavigatorAddress} (no permission)\n`);
     signalNavigator = signalNavigatorInstance;
+
+    // Deploy VestingNavigator for Phase 2f (cliff + linear vesting of shares/loot).
+    // MANAGER permission (added to the navigators[] array below) so claim() can mintShares.
+    console.log("   Deploying VestingNavigator...");
+    const VestingNavigatorJson = JSON.parse(
+      fs.readFileSync(
+        path.join(__dirname, "../../../artifacts/contracts/navigators/VestingNavigator.sol/VestingNavigator.json"),
+        "utf-8"
+      )
+    );
+    const vestingIpfsHash = await pushMetadataWithRetry(VestingNavigatorJson.bytecode, "VestingNavigator");
+    const VestingNavigatorFactory = new quais.ContractFactory(
+      VestingNavigatorABI,
+      VestingNavigatorJson.bytecode,
+      deployer,
+      vestingIpfsHash
+    );
+    // VestingNavigator constructor: daoShip, name, description
+    const vestingNavigatorInstance = await VestingNavigatorFactory.deploy(
+      predictedDAOShipAddress,
+      "Vesting",
+      "cliff + linear contributor vesting"
+    );
+    await vestingNavigatorInstance.waitForDeployment();
+    const vestingNavigatorAddress = await vestingNavigatorInstance.getAddress();
+    console.log(`   ✅ VestingNavigator: ${vestingNavigatorAddress} (MANAGER)\n`);
+    vestingNavigator = vestingNavigatorInstance;
+
+    // Deploy TimelockNavigator for Phase 2g (delayed governance-config changes).
+    // GOVERNOR permission (4, added to the navigators[] array below) so executeChange()
+    // can call the onlyGovernor setGovernanceConfig. Deployed at the contract's MIN_DELAY
+    // floor (10 min) so the suite can wait the real delay on-chain within its time budget;
+    // production DAOs use RECOMMENDED_DELAY (2 days) — see TimelockNavigator header.
+    console.log("   Deploying TimelockNavigator...");
+    const TimelockNavigatorJson = JSON.parse(
+      fs.readFileSync(
+        path.join(__dirname, "../../../artifacts/contracts/navigators/TimelockNavigator.sol/TimelockNavigator.json"),
+        "utf-8"
+      )
+    );
+    const timelockIpfsHash = await pushMetadataWithRetry(TimelockNavigatorJson.bytecode, "TimelockNavigator");
+    const TimelockNavigatorFactory = new quais.ContractFactory(
+      TimelockNavigatorABI,
+      TimelockNavigatorJson.bytecode,
+      deployer,
+      timelockIpfsHash
+    );
+    const TIMELOCK_DELAY = 600;        // MIN_DELAY (10 min) — testable floor, not a production value
+    const TIMELOCK_EXPIRY = 3600;      // MIN_EXPIRY (1 hour) executable window after the delay
+    // TimelockNavigator constructor: daoShip, delay, expiryWindow, name, description
+    const timelockNavigatorInstance = await TimelockNavigatorFactory.deploy(
+      predictedDAOShipAddress,
+      TIMELOCK_DELAY,
+      TIMELOCK_EXPIRY,
+      "Timelock",
+      "delayed governance-config changes"
+    );
+    await timelockNavigatorInstance.waitForDeployment();
+    const timelockNavigatorAddress = await timelockNavigatorInstance.getAddress();
+    console.log(`   ✅ TimelockNavigator: ${timelockNavigatorAddress} (GOVERNOR, delay ${TIMELOCK_DELAY}s)\n`);
+    timelockNavigator = timelockNavigatorInstance;
 
     // Configuration from .env.e2e
     const votingPeriod = parseInt(process.env.VOTING_PERIOD || "3600"); // 1 hour minimum (M-7 fix)
@@ -930,13 +1037,16 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
 
     // Set newly deployed navigators with MANAGER permissions (2)
     // Also add deployer as MANAGER so we can mint loot in Phase 8
+    // TimelockNavigator is the exception — it needs GOVERNOR (4) to call setGovernanceConfig.
     const navigators: string[] = [
       onboarderNavigatorAddress,
       erc20TributeNavigatorAddress, // ERC20TributeNavigator for Phase 2b
       nftGatedNavigatorAddress,     // NFTGatedNavigator for Phase 2d
+      vestingNavigatorAddress,      // VestingNavigator for Phase 2f
+      timelockNavigatorAddress,     // TimelockNavigator for Phase 2g (GOVERNOR)
       deployer.address  // Deployer as MANAGER for direct mint operations
     ];
-    const navigatorPermissions: number[] = [2, 2, 2, 2]; // MANAGER = 2
+    const navigatorPermissions: number[] = [2, 2, 2, 2, 4, 2]; // MANAGER = 2, Timelock = GOVERNOR (4)
 
     // Encode initialization params (must match DAOShip.setUp() signature)
     const initializationParams = quais.AbiCoder.defaultAbiCoder().encode(
@@ -1393,6 +1503,261 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     expect(doubleVoteReverted, "second vote by the same member should revert").to.equal(true);
 
     console.log(`\n✅ SignalNavigator non-binding poll working on-chain (no permission, share-weighted)\n`);
+  });
+
+  it("Should vest shares via VestingNavigator (createSchedule + claim)", async function () {
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("PHASE 2f: Cliff + Linear Vesting (VestingNavigator)");
+    console.log("═══════════════════════════════════════════════════════════\n");
+
+    const vestingAddress = await vestingNavigator.getAddress();
+
+    // Short, cliff-less schedule so the suite can fully vest within its wall-clock budget.
+    // startTime 0 → starts when processProposal executes; vests over VEST_DURATION seconds.
+    const VEST_AMOUNT = quais.parseQuai("12");
+    const VEST_DURATION = 120; // seconds
+    const beneficiary = bob.address;
+
+    // createSchedule is avatar-only → route it through a governance proposal that the vault
+    // executes (so the inner call arrives as msg.sender == avatar), like any navigator action.
+    const createScheduleData = vestingNavigator.interface.encodeFunctionData("createSchedule", [
+      beneficiary,
+      VEST_AMOUNT,
+      0,             // startTime 0 = now (at execution)
+      0,             // cliffDuration (no cliff)
+      VEST_DURATION, // vestingDuration
+      false,         // isLoot = false → vest shares
+    ]);
+
+    const proposalData = encodeMultiSend([
+      { operation: 0, to: vestingAddress, value: 0n, data: createScheduleData }
+    ]);
+
+    const details = JSON.stringify({
+      title: "Vest 12 shares to Bob",
+      description: `Cliff-less ${VEST_DURATION}s linear vest`,
+    });
+
+    await provider.getBlockNumber(Shard.Cyprus1);
+    const submitTx = await daoShip.connect(deployer).submitProposal(proposalData, 0, details);
+    const submitReceipt = await submitTx.wait();
+    const proposalEvent = submitReceipt.logs.find((log: any) => {
+      try {
+        return daoShip.interface.parseLog(log)?.name === "SubmitProposal";
+      } catch {
+        return false;
+      }
+    });
+    const proposalId = daoShip.interface.parseLog(proposalEvent!)?.args[0];
+    console.log(`   ✅ Proposal #${proposalId} submitted (create schedule)\n`);
+
+    await waitPastVotingStarts(provider, daoShip, proposalId, "votingStarts");
+    const vote1 = await daoShip.connect(deployer).submitVote(proposalId, true);
+    await vote1.wait();
+    const vote2 = await daoShip.connect(alice).submitVote(proposalId, true);
+    await vote2.wait();
+    console.log("   ✅ deployer + alice voted YES\n");
+
+    const votingPeriod = parseInt(process.env.VOTING_PERIOD || "3600");
+    const gracePeriod = parseInt(process.env.GRACE_PERIOD || "30");
+    console.log(`⏰ Waiting voting + grace (${votingPeriod + gracePeriod}s)...`);
+    await new Promise((resolve) => setTimeout(resolve, (votingPeriod + gracePeriod) * 1000));
+
+    await waitUntilGraceEnded(provider, daoShip, proposalId);
+    const processTx = await daoShip.connect(deployer).processProposal(proposalId, proposalData);
+    const processReceipt = await processTx.wait();
+    console.log(`   ✅ Schedule-creation proposal processed in block ${processReceipt.blockNumber}\n`);
+
+    // Pull scheduleId from the ScheduleCreated event emitted during execution (via the avatar).
+    let scheduleId: bigint | undefined;
+    for (const log of processReceipt.logs) {
+      try {
+        const parsed = vestingNavigator.interface.parseLog(log);
+        if (parsed && parsed.name === "ScheduleCreated") scheduleId = parsed.args.scheduleId;
+      } catch {
+        // not a VestingNavigator event — skip
+      }
+    }
+    expect(scheduleId, "ScheduleCreated should be emitted during processing").to.not.be.undefined;
+    console.log(`   ✅ Schedule #${scheduleId} created for Bob`);
+
+    const schedule = await vestingNavigator.schedules(scheduleId!);
+    const vestingEnd = Number(schedule.vestingEnd);
+    const bobSharesBefore = await shares.balanceOf(beneficiary);
+
+    // Wait until fully vested, gating on the navigator's OWN clock: vested() reads the
+    // EVM block.timestamp, so polling it to reach VEST_AMOUNT guarantees the subsequent
+    // claim mints the full amount (woHeader.timestamp would run ahead → partial vest).
+    console.log(`   ⏳ Waiting until fully vested (vestingEnd ${vestingEnd})...`);
+    await waitForContractClock(
+      async () => (await vestingNavigator.vested(scheduleId!)) >= VEST_AMOUNT,
+      `schedule ${scheduleId} fully vested`,
+      (VEST_DURATION + 240) * 1000
+    );
+
+    const claimTx = await vestingNavigator.connect(bob).claim(scheduleId!);
+    const claimReceipt = await claimTx.wait();
+    console.log(`   ✅ claim tx: ${claimReceipt.hash}`);
+
+    const bobSharesAfter = await shares.balanceOf(beneficiary);
+    const minted = bobSharesAfter - bobSharesBefore;
+    console.log(`   Bob shares: +${quais.formatQuai(minted)} (fully vested)\n`);
+
+    // Fully vested → the entire amount was minted; nothing remains.
+    expect(minted).to.equal(VEST_AMOUNT);
+    expect(await vestingNavigator.claimable(scheduleId!)).to.equal(0n);
+
+    // A second claim on a fully-claimed schedule reverts (NothingToClaim).
+    let secondClaimReverted = false;
+    try {
+      const tx = await vestingNavigator.connect(bob).claim(scheduleId!);
+      await tx.wait();
+    } catch {
+      secondClaimReverted = true;
+    }
+    expect(secondClaimReverted, "claiming a fully-claimed schedule should revert").to.equal(true);
+
+    console.log(`✅ VestingNavigator cliff+linear vest working on-chain (MANAGER mint via claim)\n`);
+  });
+
+  it("Should delay a governance-config change via TimelockNavigator (queue → wait delay → execute)", async function () {
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("PHASE 2g: Delayed Governance Config (TimelockNavigator)");
+    console.log("═══════════════════════════════════════════════════════════\n");
+
+    const timelockAddress = await timelockNavigator.getAddress();
+
+    // Registered as a GOVERNOR (4) navigator at launch so executeChange can call
+    // the onlyGovernor setGovernanceConfig — the cross-contract auth a mock can't fake.
+    expect(await daoShip.navigators(timelockAddress)).to.equal(4n);
+
+    // Build the target config: read the LIVE on-chain config and change ONLY quorumPercent.
+    // Re-encoding from live values guarantees every other field is preserved exactly, and
+    // lowering quorum is strictly permissive, so later phases are unaffected.
+    const curVotingPeriod = await daoShip.votingPeriod();
+    const curGracePeriod = await daoShip.gracePeriod();
+    const curProposalOffering = await daoShip.proposalOffering();
+    const curQuorum = await daoShip.quorumPercent();
+    const curSponsorThreshold = await daoShip.sponsorThreshold();
+    const curMinRetention = await daoShip.minRetentionPercent();
+    const curDefaultExpiry = await daoShip.defaultExpiryWindow();
+
+    // 1800 (was 2000): lower → strictly easier to pass, so later phases are unaffected.
+    // Deliberately NOT 1500 — a later batched-governance phase changes quorum to 1500 and
+    // asserts it, so using a distinct value here keeps both changes genuine (not a no-op).
+    const NEW_QUORUM = 1800n;
+    expect(NEW_QUORUM, "pick a quorum strictly below the current one").to.be.lessThan(curQuorum);
+    expect(NEW_QUORUM).to.not.equal(1500n);
+
+    const newConfig = quais.AbiCoder.defaultAbiCoder().encode(
+      ["uint32", "uint32", "uint256", "uint256", "uint256", "uint256", "uint32"],
+      [curVotingPeriod, curGracePeriod, curProposalOffering, NEW_QUORUM, curSponsorThreshold, curMinRetention, curDefaultExpiry]
+    );
+
+    // queueChange is avatar-only → route it through a governance proposal that the vault
+    // executes, so the inner call arrives as msg.sender == avatar via the real MultiSend path.
+    const queueData = timelockNavigator.interface.encodeFunctionData("queueChange", [newConfig]);
+    const proposalData = encodeMultiSend([
+      { operation: 0, to: timelockAddress, value: 0n, data: queueData }
+    ]);
+    const details = JSON.stringify({
+      title: "Queue quorum change behind the timelock",
+      description: `quorum ${curQuorum} → ${NEW_QUORUM} via TimelockNavigator`,
+    });
+
+    const submitTx = await daoShip.connect(deployer).submitProposal(proposalData, 0, details);
+    const submitReceipt = await submitTx.wait();
+    const proposalEvent = submitReceipt.logs.find((log: any) => {
+      try {
+        return daoShip.interface.parseLog(log)?.name === "SubmitProposal";
+      } catch {
+        return false;
+      }
+    });
+    const proposalId = daoShip.interface.parseLog(proposalEvent!)?.args[0];
+    console.log(`   ✅ Proposal #${proposalId} submitted (queueChange)\n`);
+
+    await waitPastVotingStarts(provider, daoShip, proposalId, "votingStarts");
+    await (await daoShip.connect(deployer).submitVote(proposalId, true)).wait();
+    await (await daoShip.connect(alice).submitVote(proposalId, true)).wait();
+    console.log("   ✅ deployer + alice voted YES\n");
+
+    const votingPeriod = parseInt(process.env.VOTING_PERIOD || "3600");
+    const gracePeriod = parseInt(process.env.GRACE_PERIOD || "30");
+    console.log(`⏰ Waiting voting + grace (${votingPeriod + gracePeriod}s)...`);
+    await new Promise((resolve) => setTimeout(resolve, (votingPeriod + gracePeriod) * 1000));
+
+    await waitUntilGraceEnded(provider, daoShip, proposalId);
+    const processTx = await daoShip.connect(deployer).processProposal(proposalId, proposalData);
+    const processReceipt = await processTx.wait();
+    console.log(`   ✅ queueChange proposal processed in block ${processReceipt.blockNumber}\n`);
+
+    // Pull changeId from the ChangeQueued event, and verify it arrived as the avatar.
+    const avatarAddr = await daoShip.avatar();
+    let changeId: bigint | undefined;
+    for (const log of processReceipt.logs) {
+      try {
+        const parsed = timelockNavigator.interface.parseLog(log);
+        if (parsed && parsed.name === "ChangeQueued") {
+          changeId = parsed.args.changeId;
+          expect(parsed.args.queuedBy.toLowerCase()).to.equal(avatarAddr.toLowerCase());
+        }
+      } catch {
+        // not a TimelockNavigator event — skip
+      }
+    }
+    expect(changeId, "ChangeQueued should be emitted during processing").to.not.be.undefined;
+    console.log(`   ✅ Change #${changeId} queued by the avatar\n`);
+
+    // Not applied yet, and not executable before the delay.
+    expect(await daoShip.quorumPercent()).to.equal(curQuorum);
+    expect(await timelockNavigator.isExecutable(changeId!)).to.equal(false);
+
+    // Executing before the delay reverts (ChangeNotReady).
+    let earlyRevert = false;
+    try {
+      const tx = await timelockNavigator.connect(bob).executeChange(changeId!, newConfig);
+      await tx.wait();
+    } catch {
+      earlyRevert = true;
+    }
+    expect(earlyRevert, "executeChange before the delay should revert (ChangeNotReady)").to.equal(true);
+
+    // Wait the REAL on-chain delay (gate on the chain clock, not a fixed sleep), then
+    // execute permissionlessly — anyone (bob, a non-member here) can push a matured change.
+    const queued = await timelockNavigator.queuedChanges(changeId!);
+    const executableAfter = Number(queued.executableAfter);
+    const delaySec = Number(await timelockNavigator.delay());
+    console.log(`   ⏳ Waiting the timelock delay ${delaySec}s (executableAfter ${executableAfter})...`);
+    // Gate on the navigator's OWN isExecutable view (EVM block.timestamp), not
+    // woHeader.timestamp — otherwise the wait returns while the EVM clock is still
+    // short of executableAfter and the assertion below sees isExecutable == false.
+    //
+    // Budget = delay * 3 + 300s, NOT delay + small buffer: the EVM block.timestamp
+    // runs BEHIND real/woHeader time on Orchard and can stall during a slow PoW
+    // block patch, so advancing it a full `delay` seconds can take well over `delay`
+    // seconds of wall-clock (an earlier run timed out at delay+240). Over-waiting is
+    // harmless here — TIMELOCK_EXPIRY gives a full hour of executable window after
+    // executableAfter, and we execute the instant isExecutable flips true.
+    await waitForContractClock(
+      async () => await timelockNavigator.isExecutable(changeId!),
+      `change ${changeId} executable`,
+      (delaySec * 3 + 300) * 1000
+    );
+
+    expect(await timelockNavigator.isExecutable(changeId!)).to.equal(true);
+    const execTx = await timelockNavigator.connect(bob).executeChange(changeId!, newConfig);
+    const execReceipt = await execTx.wait();
+    console.log(`   ✅ executeChange tx: ${execReceipt.hash}`);
+
+    // Config applied: quorum changed, every other field preserved, change no longer executable.
+    expect(await daoShip.quorumPercent()).to.equal(NEW_QUORUM);
+    expect(await daoShip.votingPeriod()).to.equal(curVotingPeriod);
+    expect(await daoShip.gracePeriod()).to.equal(curGracePeriod);
+    expect(await daoShip.minRetentionPercent()).to.equal(curMinRetention);
+    expect(await timelockNavigator.isExecutable(changeId!)).to.equal(false);
+
+    console.log(`✅ TimelockNavigator delayed config change applied on-chain (GOVERNOR setGovernanceConfig)\n`);
   });
 
   it("Should submit, vote, and process funding proposal", async function () {

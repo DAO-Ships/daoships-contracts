@@ -3,6 +3,7 @@ pragma solidity ^0.8.22;
 
 import "../core/DAOShip.sol";
 import "../interfaces/INavigator.sol";
+import "../libraries/Permissions.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /**
@@ -21,6 +22,15 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
  * Lifecycle (additive to the existing proposal flow):
  *   votingPeriod → gracePeriod → proposal processed (calls `queueChange`)
  *     → delay (second ragequit window) → `executeChange`
+ *
+ * Sizing the delay: `MIN_DELAY` is only a sanity floor (the change must not execute
+ * instantly) — it is NOT a protective window. Minutes are not enough time for members
+ * to notice a passed config change and ragequit ahead of it, and the existing
+ * `gracePeriod` already provides the first exit window for every proposal. For this
+ * navigator's delay to function as a real *second* exit window it must be meaningfully
+ * longer than the grace period, sized in days. Production DAOs should therefore pass at
+ * least `RECOMMENDED_DELAY` (2 days). The contract enforces only the `MIN_DELAY` floor;
+ * the dapp/indexer surface a warning for sub-`RECOMMENDED_DELAY` deployments.
  *
  * ────────────────────────────────────────────────────────────────────────────
  * ADVISORY, NOT ENFORCED — READ THIS.
@@ -58,11 +68,26 @@ contract TimelockNavigator is ReentrancyGuard, INavigator {
     /// @notice Navigator type identifier for indexer discovery
     string public constant navigatorType = "TimelockNavigator";
 
-    /// @dev Matches DAOShip.GOVERNOR — local constant avoids an external call
-    uint256 private constant _GOVERNOR = 4;
+    /// @dev Sourced from the shared Permissions library — single definition of the
+    ///      navigator permission bits, resolved at compile time (no runtime DAO call,
+    ///      so it is safe under the predicted-address deployment pattern).
+    uint256 private constant _GOVERNOR = Permissions.GOVERNOR;
 
-    /// @notice Minimum permitted delay
-    uint256 public constant MIN_DELAY = 1 hours;
+    /// @notice Minimum permitted delay — a sanity floor ("not instant"), NOT a
+    ///         protective guarantee.
+    /// @dev Exists only so a queued change is observable on-chain before it can
+    ///      execute. Ten minutes is far too short to be a meaningful member exit
+    ///      window; production DAOs SHOULD pass a delay of at least
+    ///      `RECOMMENDED_DELAY`. See the "Sizing the delay" note in the contract header.
+    uint256 public constant MIN_DELAY = 10 minutes;
+
+    /// @notice Recommended minimum delay for production DAOs (advisory; NOT enforced).
+    /// @dev A real "second ragequit window" must give members days — not minutes — to
+    ///      notice a passed config change and exit at the pre-change terms. Two days
+    ///      matches common governance-timelock practice (e.g. Compound's MINIMUM_DELAY).
+    ///      The contract enforces only the looser `MIN_DELAY` sanity floor; the dapp and
+    ///      indexer should steer deployers to `>= RECOMMENDED_DELAY` and warn below it.
+    uint256 public constant RECOMMENDED_DELAY = 2 days;
 
     /// @notice Maximum permitted delay
     uint256 public constant MAX_DELAY = 30 days;

@@ -46,6 +46,9 @@ contract OnboarderNavigator is BaseNavigator {
     error TransferFailed();
     error RefundFailed();
 
+    /// @notice Emitted when governance recovers stuck ETH (e.g. a failed refund) from this contract
+    event StuckETHRecovered(address indexed to, uint256 amount);
+
     /**
      * @notice Deploy OnboarderNavigator
      * @param _daoShip DAOShip DAO address
@@ -121,7 +124,8 @@ contract OnboarderNavigator is BaseNavigator {
     function withdrawStuckETH(address payable to, uint256 amount) external nonReentrant {
         if (msg.sender != daoShip.avatar()) revert NotAuthorized();
         (bool success, ) = to.call{value: amount}("");
-        require(success, "OnboarderNavigator: withdrawal failed");
+        if (!success) revert TransferFailed();
+        emit StuckETHRecovered(to, amount);
     }
 
     /**

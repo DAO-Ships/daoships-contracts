@@ -3,6 +3,7 @@ pragma solidity ^0.8.22;
 
 import "../core/DAOShip.sol";
 import "../interfaces/INavigator.sol";
+import "../libraries/Permissions.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
@@ -24,8 +25,10 @@ abstract contract BaseNavigator is ReentrancyGuard, INavigator {
     // Constants
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// @dev Matches DAOShip.GOVERNOR — local constant avoids an external call
-    uint256 private constant _GOVERNOR = 4;
+    /// @dev Sourced from the shared Permissions library — single definition of the
+    ///      navigator permission bits, resolved at compile time (no runtime DAO call,
+    ///      so it is safe under the predicted-address deployment pattern).
+    uint256 private constant _GOVERNOR = Permissions.GOVERNOR;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Immutables

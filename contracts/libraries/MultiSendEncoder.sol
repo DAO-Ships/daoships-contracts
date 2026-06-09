@@ -2,7 +2,7 @@
 pragma solidity ^0.8.22;
 
 /**
- * @title DAOShipUtils
+ * @title MultiSendEncoder
  * @notice Utility library for encoding MultiSend transaction batches
  * @dev Encodes an array of (target, value, data) tuples into the packed format
  *      expected by MultiSend.multiSend(bytes). This is a convenience for on-chain
@@ -14,7 +14,7 @@ pragma solidity ^0.8.22;
  *      Practical limit: ~50 actions per batch. Beyond that, memory expansion gas
  *      becomes significant. Proposals rarely need more than 5-10 actions.
  */
-library DAOShipUtils {
+library MultiSendEncoder {
     error LengthMismatch();
 
     /**

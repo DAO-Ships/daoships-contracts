@@ -142,7 +142,7 @@ Reference configurations for deploying DAO Ships DAOs at different scales and or
 - **ERC20TributeNavigator** — For stablecoin-denominated membership (investors, grant-funded members).
 
 **Future (critical for this scale):**
-- **TimelockNavigator** (GOVERNOR) — 48-hour delay on governance parameter changes. Wraps `setGovernanceConfig` behind a timelock so members can exit before radical parameter changes take effect.
+- **TimelockNavigator** (GOVERNOR) — 48-hour delay on governance parameter changes (the recommended value; the contract floor `MIN_DELAY` is only 10 min, which is too short to be a real exit window — use ≥ 2 days). Wraps `setGovernanceConfig` behind a timelock so members can exit before radical parameter changes take effect.
 - **BudgetNavigator** (MANAGER) — Quarterly contributor budgets. Reduces per-cycle proposal overhead for routine payroll operations.
 - **SignalNavigator** — Non-binding governance polls. Critical at this scale for temperature checks before committing to full proposals.
 - **VestingNavigator** (MANAGER) — Time-locked share distribution for core team and long-term contributors. Cliff + linear vest. Burns unvested shares on departure.

@@ -15,8 +15,10 @@ async function deployCloneOf(impl: any, factory: any, signer: any) {
   return factory.attach(await raw.getAddress());
 }
 
+const MINUTE = 60;
 const HOUR = 60 * 60;
 const DAY = 24 * HOUR;
+const MIN_DELAY = 10 * MINUTE; // contract MIN_DELAY (sanity floor)
 
 const coder = ethers.AbiCoder.defaultAbiCoder();
 
@@ -50,6 +52,9 @@ interface DeployOpts {
   expiryWindow?: number;
   /** register the timelock with GOVERNOR permission on the DAO (default true) */
   grantGovernor?: boolean;
+  /** also register `dave` (a non-avatar EOA) as a GOVERNOR navigator, to exercise
+   *  the GOVERNOR-navigator branch of `_isGovernorOrAvatar` (default false) */
+  extraGovernor?: boolean;
 }
 
 /**
@@ -59,7 +64,7 @@ interface DeployOpts {
  * large enough for sponsorThreshold validation in the executed config).
  */
 async function deployTimelock(opts: DeployOpts = {}) {
-  const { delay = 2 * DAY, expiryWindow = 7 * DAY, grantGovernor = true } = opts;
+  const { delay = 2 * DAY, expiryWindow = 7 * DAY, grantGovernor = true, extraGovernor = false } = opts;
   const [deployer, alice, bob, carol, dave] = await ethers.getSigners();
 
   const SharesERC20 = await ethers.getContractFactory("SharesERC20");
@@ -100,8 +105,18 @@ async function deployTimelock(opts: DeployOpts = {}) {
   );
   await nav.waitForDeployment();
 
-  const navigators = grantGovernor ? [await nav.getAddress()] : [];
-  const permissions = grantGovernor ? [4] : []; // GOVERNOR
+  const navigators: string[] = [];
+  const permissions: number[] = []; // 4 = GOVERNOR
+  if (grantGovernor) {
+    navigators.push(await nav.getAddress());
+    permissions.push(4);
+  }
+  if (extraGovernor) {
+    // A non-avatar address holding GOVERNOR — exercises the navigator-permission
+    // branch of `_isGovernorOrAvatar` (distinct from the avatar branch).
+    navigators.push(dave.address);
+    permissions.push(4);
+  }
 
   const memberAddrs = [alice.address, bob.address, carol.address];
   const shareAmounts = [ethers.parseEther("100"), ethers.parseEther("50"), ethers.parseEther("30")];
@@ -162,7 +177,19 @@ describe("TimelockNavigator", function () {
     it("reverts DelayTooShort below MIN_DELAY", async function () {
       const { daoShip } = await deployTimelock();
       const TL = await ethers.getContractFactory("TimelockNavigator");
-      await expect(TL.deploy(await daoShip.getAddress(), HOUR - 1, 7 * DAY, "", "")).to.be.revertedWithCustomError(TL, "DelayTooShort");
+      await expect(TL.deploy(await daoShip.getAddress(), MIN_DELAY - 1, 7 * DAY, "", "")).to.be.revertedWithCustomError(TL, "DelayTooShort");
+    });
+
+    it("accepts a delay exactly at MIN_DELAY and exposes the sanity-floor / recommended constants", async function () {
+      const { daoShip } = await deployTimelock();
+      const TL = await ethers.getContractFactory("TimelockNavigator");
+      const nav = await TL.deploy(await daoShip.getAddress(), MIN_DELAY, 7 * DAY, "", "");
+      await nav.waitForDeployment();
+      expect(await nav.delay()).to.equal(MIN_DELAY);
+      // MIN_DELAY is only a "not instant" floor; RECOMMENDED_DELAY is the advisory production minimum.
+      expect(await nav.MIN_DELAY()).to.equal(MIN_DELAY);
+      expect(await nav.RECOMMENDED_DELAY()).to.equal(2 * DAY);
+      expect(await nav.MIN_DELAY()).to.be.lessThan(await nav.RECOMMENDED_DELAY());
     });
 
     it("reverts DelayTooLong above MAX_DELAY", async function () {
@@ -390,13 +417,34 @@ describe("TimelockNavigator", function () {
   });
 
   describe("pause / unpause / emergencyCancelAll", function () {
-    it("avatar pauses and unpauses; GOVERNOR navigator is also authorized", async function () {
+    it("avatar pauses and unpauses", async function () {
       const { nav, avatar } = await deployTimelock();
       const av = await asAvatar(await avatar.getAddress());
       await expect(nav.connect(av).pause()).to.emit(nav, "Paused").withArgs(await avatar.getAddress());
       expect(await nav.paused()).to.equal(true);
       await expect(nav.connect(av).unpause()).to.emit(nav, "Unpaused").withArgs(await avatar.getAddress());
       expect(await nav.paused()).to.equal(false);
+    });
+
+    it("a GOVERNOR navigator (non-avatar) is also authorized to pause / unpause / emergencyCancelAll", async function () {
+      // `dave` is registered as a GOVERNOR navigator but is NOT the avatar, so this
+      // exercises the `(navigators[msg.sender] & GOVERNOR) != 0` branch of
+      // `_isGovernorOrAvatar` — the branch the avatar-based tests never reach.
+      const { nav, avatar, dave } = await deployTimelock({ extraGovernor: true });
+      expect(dave.address).to.not.equal(await avatar.getAddress());
+
+      await expect(nav.connect(dave).pause()).to.emit(nav, "Paused").withArgs(dave.address);
+      expect(await nav.paused()).to.equal(true);
+      await expect(nav.connect(dave).unpause()).to.emit(nav, "Unpaused").withArgs(dave.address);
+      expect(await nav.paused()).to.equal(false);
+
+      // queue a change, then have the GOVERNOR navigator emergency-cancel it
+      const av = await asAvatar(await avatar.getAddress());
+      await nav.connect(av).queueChange(encodeConfig({ votingPeriod: 6 * DAY }));
+      await expect(nav.connect(dave).emergencyCancelAll())
+        .to.emit(nav, "ChangeCancelled").withArgs(0, dave.address);
+      expect((await nav.queuedChanges(0)).cancelled).to.equal(true);
+      expect(await nav.paused()).to.equal(true); // emergencyCancelAll also pauses
     });
 
     it("reverts NotAuthorized for non-governor non-avatar pause/unpause", async function () {

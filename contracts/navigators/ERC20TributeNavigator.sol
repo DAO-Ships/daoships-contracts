@@ -42,6 +42,9 @@ contract ERC20TributeNavigator is BaseNavigator {
 
     error InsufficientAmount();
 
+    /// @notice Emitted when governance recovers stuck tokens from this contract
+    event StuckTokensRecovered(address indexed token, address indexed to, uint256 amount);
+
     /**
      * @notice Deploy ERC20TributeNavigator
      * @param _daoShip DAOShip DAO address
@@ -157,6 +160,7 @@ contract ERC20TributeNavigator is BaseNavigator {
     function withdrawStuckTokens(IERC20 token, address to, uint256 amount) external nonReentrant {
         if (msg.sender != daoShip.avatar()) revert NotAuthorized();
         SafeERC20.safeTransfer(token, to, amount);
+        emit StuckTokensRecovered(address(token), to, amount);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

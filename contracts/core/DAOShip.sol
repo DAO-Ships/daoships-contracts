@@ -4,6 +4,7 @@ pragma solidity ^0.8.22;
 import "../interfaces/IAvatar.sol";
 import "../interfaces/IDAOShipToken.sol";
 import "../libraries/Enum.sol";
+import "../libraries/Permissions.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
@@ -50,16 +51,18 @@ contract DAOShip is ReentrancyGuard {
      * Checking permissions (bitwise AND):
      * - require((navigators[address] & MANAGER) != 0, "not manager");
      */
-    uint256 public constant ADMIN = 1;
+    // Re-exported from the shared Permissions library (single source of truth) so the
+    // public getters indexers/navigators read stay on this contract.
+    uint256 public constant ADMIN = Permissions.ADMIN;
 
     /// @notice Navigator permission: can mint/burn shares and loot
-    uint256 public constant MANAGER = 2;
+    uint256 public constant MANAGER = Permissions.MANAGER;
 
     /// @notice Navigator permission: can cancel proposals, set governance config
-    uint256 public constant GOVERNOR = 4;
+    uint256 public constant GOVERNOR = Permissions.GOVERNOR;
 
     /// @notice Maximum valid permission bitmask (ADMIN | MANAGER | GOVERNOR)
-    uint256 public constant MAX_PERMISSION = 7;
+    uint256 public constant MAX_PERMISSION = Permissions.MAX_PERMISSION;
 
     /// @notice Minimum voting period in seconds
     uint32 public constant MIN_VOTING_PERIOD = 60;

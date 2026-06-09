@@ -49,6 +49,8 @@ All navigators MUST implement `INavigator` (`contracts/interfaces/INavigator.sol
 
 ### OnboarderNavigator (MANAGER)
 
+> **Canonical reference:** [`docs/ONBOARDER_NAVIGATOR.md`](ONBOARDER_NAVIGATOR.md) — full ABI, gotchas, and audit sign-off.
+
 **What it does:** Instant onboarding via native token (QUAI) tribute. Members send QUAI, receive shares/loot atomically.
 
 **Key features:** Dual pricing (multiplier or fixed-price), Merkle allowlist, mintCap, perAddressCap, expiry, pause, refund handling, stuck native token recovery (`withdrawStuckETH`). Implements `INavigator` with `deployer` immutable and `NavigatorDeployed` event.
@@ -58,6 +60,8 @@ All navigators MUST implement `INavigator` (`contracts/interfaces/INavigator.sol
 **Deployed address:** `0x0031C843A919dFc022DeA5A809B693009A29464b` (Cyprus1 Orchard Testnet)
 
 ### ERC20TributeNavigator (MANAGER)
+
+> **Canonical reference:** [`docs/ERC20_TRIBUTE_NAVIGATOR.md`](ERC20_TRIBUTE_NAVIGATOR.md) — full ABI, gotchas, and audit sign-off.
 
 **What it does:** Instant onboarding via ERC20 token tribute. Accepts any configured ERC20, transfers to vault, mints shares/loot. Supports ERC-2612 permit for single-transaction onboarding (sign + onboard instead of approve + onboard).
 
@@ -93,6 +97,8 @@ Upstream zodiacBaal includes TributeMinion -- a proposal-gated escrow for member
 ### Priority 1: Blocking for Protocol/Investment DAOs
 
 #### TimelockNavigator (GOVERNOR) — **SHIPPED**
+
+> **Canonical reference:** [`docs/TIMELOCK_NAVIGATOR.md`](TIMELOCK_NAVIGATOR.md) — full ABI, gotchas, and audit sign-off.
 
 **What it does:** Wraps `setGovernanceConfig` behind a mandatory delay. When governance passes a parameter change, it is queued for N hours/days before taking effect. Members who disagree can ragequit during the delay.
 
@@ -136,7 +142,9 @@ mapping(uint256 => QueuedChange) public queuedChanges;
 bool public paused;
 ```
 
-**Constructor:** `address _daoShip, uint256 _delay, uint256 _expiryWindow`. Validations: `_delay >= 1 hours`, `_delay <= 30 days`, `_expiryWindow >= 1 hours`.
+**Constructor:** `address _daoShip, uint256 _delay, uint256 _expiryWindow`. Validations: `_delay >= 10 minutes` (`MIN_DELAY`), `_delay <= 30 days` (`MAX_DELAY`), `_expiryWindow` in `[1 hours, 3650 days]`.
+
+> **Sizing the delay.** `MIN_DELAY` (10 min) is only a sanity floor — it guarantees a queued change is *observable* before it executes, not that members have time to react. It is **not** a protective window. The `gracePeriod` already gives every proposal its first ragequit window; for this navigator's delay to be a meaningful *second* exit window it must be sized in days. Production DAOs should pass at least `RECOMMENDED_DELAY` (2 days, advisory — matches common practice like Compound's 2-day floor). The contract enforces only `MIN_DELAY`; the dapp/indexer warn on sub-`RECOMMENDED_DELAY` deployments.
 
 **Key functions:**
 
@@ -172,8 +180,9 @@ function emergencyCancelAll() external;
 10. Fuzz: random delays/configs/timestamps -- invariant: config never changes before delay
 
 **Tests:**
-- **Unit** — `test/unit/TimelockNavigator.test.ts` (28 passing). Constructor bounds (`DelayTooShort`/`DelayTooLong`/expiry window/zero DAO), avatar-gated `queueChange` + `IsPaused`, the happy-path execute applying config to DAOShip, permissionless execution, every revert path (`ChangeNotReady`, `ChangeExpired`, `ConfigHashMismatch`, `ChangeAlreadyExecuted`, `ChangeAlreadyCancelled`, `ChangeDoesNotExist`), the no-lock-out behavior when DAOShip rejects a malformed config, the missing-GOVERNOR-permission revert, exact `[executableAfter, expiresAt]` boundaries, cancel auth, `pause`/`unpause`/`emergencyCancelAll` (cancels pending, leaves executed, pauses), and the `isExecutable` view.
+- **Unit** — `test/unit/TimelockNavigator.test.ts` (30 passing). Constructor bounds (`DelayTooShort`/`DelayTooLong`/expiry window/zero DAO), the `MIN_DELAY` floor + `RECOMMENDED_DELAY` constants, avatar-gated `queueChange` + `IsPaused`, the happy-path execute applying config to DAOShip, permissionless execution, every revert path (`ChangeNotReady`, `ChangeExpired`, `ConfigHashMismatch`, `ChangeAlreadyExecuted`, `ChangeAlreadyCancelled`, `ChangeDoesNotExist`), the no-lock-out behavior when DAOShip rejects a malformed config, the missing-GOVERNOR-permission revert, exact `[executableAfter, expiresAt]` boundaries, cancel auth, `pause`/`unpause`/`emergencyCancelAll` via **both** the avatar **and** a non-avatar GOVERNOR navigator (the `_isGovernorOrAvatar` navigator branch), and the `isExecutable` view.
 - **Local E2E** — `test/e2e/local/TimelockNavigator.e2e.test.ts` (3 passing). Real DAOShip driven through the full proposal lifecycle: registering the timelock as GOVERNOR via governance, a passed proposal queueing a change (arriving as `msg.sender == avatar`), executing after the delay, avatar cancelling via a follow-up proposal, and an explicit test proving the **advisory bypass** (a proposal applies config directly via `executeAsGovernance` while `changeCount` stays 0).
+- **Onchain E2E** — `test/e2e/onchain/OnChainDAOLifecycle.test.ts` Phase 2g. Against a live Cyprus1 DAO: timelock registered as GOVERNOR (4) at launch, a real proposal queues a quorum change (validating `queueChange` arrives as `msg.sender == avatar` through the vault MultiSend), `ChangeNotReady` before the delay, then a wait of the **real** on-chain delay (deployed at the `MIN_DELAY` floor so the suite can wait it) and a permissionless `executeChange` that applies the config via the GOVERNOR `setGovernanceConfig`.
 
 **Status:** Shipped. Contract `contracts/navigators/TimelockNavigator.sol` (~290 lines incl. NatSpec), deploy script `scripts/deploy/007_deploy_timelock_navigator.ts`. Must be registered with GOVERNOR (4) via a `setNavigators` governance proposal. Advisory at the contract layer (see warning above) — usage is enforced in the app and bypass is flagged by the indexer.
 
@@ -373,6 +382,8 @@ function getDelegateInfo(address delegate) external view returns (
 
 #### SignalNavigator (No Permission) — **SHIPPED**
 
+> **Canonical reference:** [`docs/SIGNAL_NAVIGATOR.md`](SIGNAL_NAVIGATOR.md) — full ABI, gotchas, and audit sign-off.
+
 **What it does:** Non-executing, share-weighted governance polls. Members vote using their delegation-aware voting power, but no on-chain action executes. Used for temperature checks before committing to binding proposals. Polls can open immediately or be **scheduled** to open at a future time.
 
 **Why DAO Ships needs this:** DAOShip proposals are heavyweight -- full votingPeriod + gracePeriod, retention check, gas to process. A proposal that does nothing still costs 10 days and requires 100 voters at 10% quorum.
@@ -450,9 +461,11 @@ function pollStatus(uint256 pollId) external view returns (Status);
 
 ---
 
-#### VestingNavigator (MANAGER)
+#### VestingNavigator (MANAGER) — **SHIPPED**
 
-**What it does:** Mints shares on a vesting schedule -- cliff period followed by linear unlock. Unvested shares are clawed back if the recipient leaves.
+> **Canonical reference:** [`docs/VESTING_NAVIGATOR.md`](VESTING_NAVIGATOR.md) — full ABI, gotchas, and audit sign-off.
+
+**What it does:** Mints shares or loot on a vesting schedule -- cliff period followed by linear unlock, minted *incrementally as it vests* (nothing is escrowed up front, so unvested tokens never exist and carry no voting power). Revocation is **non-destructive**: it freezes future accrual but does not claw back already-minted tokens (clawback is a separate governance `burnShares`/`burnLoot`).
 
 **Why DAO Ships needs this:** DAOShip can mint shares, but has no time-locked minting concept. Minting upfront gives full voting power immediately. The only way to vest is to mint incrementally -- which requires either a proposal per tranche or a navigator that mints automatically on schedule.
 
@@ -512,13 +525,16 @@ function claimable(uint256 scheduleId) external view returns (uint256);
 function getSchedules(address beneficiary) external view returns (uint256[] memory);
 ```
 
-- `createSchedule` -- avatar only.
-- `claim` -- beneficiary or avatar. Mints shares or loot depending on `isLoot` flag.
-- `revoke` -- avatar only. Sets `revoked = true` and `revokedAt = block.timestamp`. Does NOT burn already-minted shares (non-destructive). Future claims capped at revocation point. Separate governance proposal needed to burn already-vested shares.
+- `createSchedule` -- avatar only (via proposal); reverts `IsPaused` when paused. `startTime == 0` means "now". Validates beneficiary, amount, `vestingDuration > 0`, `cliffDuration <= vestingDuration`.
+- `claim` -- beneficiary or avatar. Mints shares or loot (per `isLoot`) **to the beneficiary** regardless of caller. CEI: `claimed` updated before the mint, so a mint revert (e.g. missing MANAGER) rolls back cleanly. Allowed even after revoke (to collect the pre-revoke vested portion) and even when paused (vested funds are never trapped).
+- `revoke` -- avatar only. Sets `revoked = true` and `revokedAt = block.timestamp`. Does NOT burn already-minted shares (non-destructive). Future claims capped at the revocation point. Separate governance `burnShares` needed to claw back already-vested shares.
+- `pause` / `unpause` -- GOVERNOR navigator or avatar. Blocks only `createSchedule`.
 
-**Events:** `ScheduleCreated`, `TokensClaimed`, `ScheduleRevoked`, `Paused`, `Unpaused`.
+**Standalone (not `BaseNavigator`).** Unlike NFTGated, `claim` may be called by the beneficiary *or* the avatar, so `BaseNavigator`'s `msg.sender`-keyed `mintCap`/`perAddressCap` would mis-attribute. Dilution is bounded per schedule by the governance-set `totalAmount` instead. Struct fields are ordered for storage packing (4 slots, not 5).
 
-**Custom errors:** `InvalidConfig`, `NotAuthorized`, `IsPaused`, `NothingToClaim`, `ScheduleRevoked`, `AlreadyRevoked`, `ZeroAmount`, `CliffExceedsVesting`, `InvalidBeneficiary`.
+**Events:** `ScheduleCreated`, `TokensClaimed`, `ScheduleRevoked` (carries `revokedAt` + `vestedAtRevoke`), `Paused`, `Unpaused`, `NavigatorDeployed`.
+
+**Custom errors:** `InvalidConfig`, `NotAuthorized`, `IsPaused`, `InvalidBeneficiary`, `ZeroAmount`, `CliffExceedsVesting`, `ScheduleDoesNotExist`, `NothingToClaim`, `AlreadyRevoked`. (The spec's `ScheduleRevoked` error was dropped as dead code — claims are *allowed* after revoke, so nothing reverts with it; `ScheduleDoesNotExist` was added to guard unknown ids.)
 
 **Test scenarios:**
 
@@ -533,11 +549,20 @@ function getSchedules(address beneficiary) external view returns (uint256[] memo
 9. Revert: non-avatar create -> `NotAuthorized`
 10. Fuzz: random times/durations. Invariant: `claimed <= totalAmount` and `claimed <= vestedAmount`
 
-**Estimated size:** ~180 lines of Solidity.
+**Tests:**
+- **Unit** — `test/unit/VestingNavigator.test.ts` (24 passing). All 10 spec scenarios plus: `startTime=0`→now, every constructor/param revert (`InvalidBeneficiary`/`ZeroAmount`/`InvalidConfig`/`CliffExceedsVesting`), loot vesting, avatar-claims-for-beneficiary, stranger-claim rejection, revoke-after-full-vest, the missing-MANAGER revert, view reverts (`ScheduleDoesNotExist`), and a monotone-invariant walk asserting `claimed == vested ≤ total` against a JS mirror of the formula at exact block timestamps.
+- **Local E2E** — `test/e2e/local/VestingNavigator.e2e.test.ts` (2 passing). Real DAOShip via the proposal lifecycle: register MANAGER by governance, create a schedule by proposal (arrives as `msg.sender == avatar`), `claim` mints real shares conferring **live voting power** (auto self-delegation), and revoke-by-proposal freezes accrual.
+- **Onchain E2E** — Phase 2f in `test/e2e/onchain/OnChainDAOLifecycle.test.ts` (Cyprus1/Orchard). Deploys the navigator with MANAGER, creates a short cliff-less schedule via a governance proposal, waits past `vestingEnd` on the chain clock, claims the full amount, and asserts the second claim reverts.
+
+**Audit:** Three-lens review (security / scalability / stability / efficiency / succinctness) found no Critical/High issues. One efficiency fix applied — struct fields reordered for storage packing (4 slots instead of 5, ~2,900 gas saved per schedule). CEI + `ReentrancyGuard` on all state-changing externals; `claim` mints to the beneficiary (not the caller); `_vestedAmount` proven free of underflow/division-by-zero; the `claimed ≤ vested ≤ totalAmount` invariant holds across revoke. The spec's unused `ScheduleRevoked` error was removed.
+
+**Status:** Shipped. Contract `contracts/navigators/VestingNavigator.sol` (~270 lines incl. NatSpec), deploy script `scripts/deploy/008_deploy_vesting_navigator.ts`. Must be registered with MANAGER (2) via a `setNavigators` governance proposal; schedules are then created by governance via `createSchedule`.
 
 ---
 
 #### NFTGatedNavigator (MANAGER) — **SHIPPED**
+
+> **Canonical reference:** [`docs/NFT_GATE_NAVIGATOR.md`](NFT_GATE_NAVIGATOR.md) — full ABI, gotchas, and audit sign-off.
 
 **What it does:** Gates DAO membership behind ownership of a specific **ERC-721** collection. A holder calls `onboard(tokenId)` and receives a fixed amount of shares/loot. Supports free-mint (credential = membership) and tribute-required (credential + payment = membership) modes. Ownership is checked live — no allowlist maintenance.
 
@@ -801,7 +826,7 @@ function isDelinquent(address member) external view returns (bool);
 | **v1.0 (shipped)** | OnboarderNavigator, ERC20TributeNavigator | Startup, Community, Agent DAOs |
 | **v1.1** | TimelockNavigator (**shipped**), BudgetNavigator | Protocol, Investment DAOs |
 | **v1.2** | SignalNavigator (**shipped**), DelegateRegistryNavigator, NFTGatedNavigator (**shipped**) | 200+ member governance, credential-gated DAOs |
-| **v2.0** | VestingNavigator, CircuitBreakerNavigator | Core contributor compensation, safety automation |
+| **v2.0** | VestingNavigator (**shipped**), CircuitBreakerNavigator | Core contributor compensation, safety automation |
 | **v2.1** | OracleNavigator, SubscriptionNavigator | Adaptive governance, recurring fees |
 
 ### Navigator by DAO Configuration
@@ -813,7 +838,7 @@ function isDelinquent(address member) external view returns (bool);
 | BudgetNavigator | -- | Critical | Critical | -- | Critical | **Not built** |
 | SignalNavigator | -- | Useful | Critical | -- | -- | **Shipped** |
 | TimelockNavigator | -- | -- | Critical | Critical | -- | **Shipped** |
-| VestingNavigator | -- | Useful | Critical | -- | -- | **Not built** |
+| VestingNavigator | -- | Useful | Critical | -- | -- | **Shipped** |
 | DelegateRegistryNavigator | -- | Useful | Critical | -- | -- | **Not built** |
 | RageKick (pattern) | -- | Useful | Useful | Required | -- | **Documented** |
 | SubscriptionNavigator | -- | -- | -- | Useful | -- | **Not built** |
@@ -833,7 +858,7 @@ function isDelinquent(address member) external view returns (bool);
 | BudgetNavigator | MANAGER (2) | `mintShares`, `mintLoot` (optional) | Yes | ~280 |
 | SignalNavigator | None | None (reads only) | No | Shipped |
 | DelegateRegistryNavigator | None | None (reads only) | No | ~120 |
-| VestingNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | ~180 |
+| VestingNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | Shipped |
 | CircuitBreakerNavigator | ADMIN (1) | `setAdminConfig` | No | ~170 |
 | OracleNavigator | GOVERNOR (4) | `setGovernanceConfig` | No | ~180 |
 | SubscriptionNavigator | MANAGER (2) | `burnShares`, `mintLoot` | No | ~190 |

@@ -313,7 +313,7 @@ Upstream's TributeMinion (176 lines) is a proposal-based tribute system with ERC
 - Mint caps (global and per-address via `perAddressCap`)
 - Expiry timestamps
 - Pause/unpause (GOVERNOR or avatar only)
-- `withdrawStuckETH()` for governance recovery (OnboarderNavigator), `withdrawStuckTokens()` (ERC20TributeNavigator)
+- `withdrawStuckETH()` for governance recovery (OnboarderNavigator, emits `StuckETHRecovered`), `withdrawStuckTokens()` (ERC20TributeNavigator, emits `StuckTokensRecovered`)
 - `ReentrancyGuard` on all entry points
 - Fee-on-transfer token detection (ERC20TributeNavigator: balance-before/after check)
 - ERC-2612 permit support (`onboardWithPermit()` on ERC20TributeNavigator — single-tx onboarding)

@@ -222,9 +222,20 @@ The contract enforces a `MIN_VOTING_PERIOD` of 60 seconds. This is designed for 
 | `proposalOffering` | 0 | > 0 (token-denominated) | No upper bound | Anti-spam cost for non-sponsor proposals |
 | `defaultExpiryWindow` | 600s (10m) | ≥ 604800s (7 days) | No bounds | Processing window after grace before auto-expiry |
 
+### TimelockNavigator delay (if used)
+
+If you grant the **TimelockNavigator** GOVERNOR permission to delay governance-config changes, its `delay` is a *second* exit window (after `gracePeriod`) specific to config changes. The contract enforces only a **10-minute `MIN_DELAY` sanity floor** — that is **not** a protective window; minutes are not enough time for members to notice a passed change and ragequit ahead of it. For the delay to do its job, set it to at least **`RECOMMENDED_DELAY` (2 days)**, sized longer than your grace period.
+
+| Parameter | Sanity floor (`MIN_DELAY`) | Recommended (`RECOMMENDED_DELAY`) | Enforced bounds |
+|-----------|---------------------------|-----------------------------------|-----------------|
+| TimelockNavigator `delay` | 10 min | ≥ 2 days | MIN 10 min, MAX 30 days |
+| TimelockNavigator `expiryWindow` | — | a few days (cover ops latency) | MIN 1 hour, MAX 3650 days |
+
+The dapp/indexer should surface a warning on any TimelockNavigator deployed with `delay < RECOMMENDED_DELAY`.
+
 ### Why gracePeriod matters
 
-The grace period is the only window members have to ragequit (exit with proportional assets) before a passed proposal executes. If `gracePeriod = 0`, proposals execute immediately after voting ends. Members have no exit window regardless of what the proposal does. Set `gracePeriod >= votingPeriod` so members always have at least as much time to exit as the vote ran.
+The grace period is the (primary) window members have to ragequit (exit with proportional assets) before a passed proposal executes. If `gracePeriod = 0`, proposals execute immediately after voting ends. Members have no exit window regardless of what the proposal does. Set `gracePeriod >= votingPeriod` so members always have at least as much time to exit as the vote ran.
 
 ### defaultExpiryWindow: preventing zombie proposals
 

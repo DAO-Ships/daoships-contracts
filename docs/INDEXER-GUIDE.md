@@ -402,7 +402,7 @@ event DelegateVotesChanged(address delegate, uint256 previousBalance, uint256 ne
 
 ### 4. Navigator Events
 
-Emitted by navigator contracts (OnboarderNavigator, ERC20TributeNavigator, NFTGatedNavigator, SignalNavigator). All navigators implement `INavigator` and emit `NavigatorDeployed` at construction time. Note that not every navigator is an *onboarding* navigator — `SignalNavigator` runs non-binding polls and emits no `Onboard` event (see below).
+Emitted by navigator contracts (OnboarderNavigator, ERC20TributeNavigator, NFTGatedNavigator, SignalNavigator, TimelockNavigator, VestingNavigator). All navigators implement `INavigator` and emit `NavigatorDeployed` at construction time. Note that not every navigator is an *onboarding* navigator — `SignalNavigator` (polls), `TimelockNavigator` (config delay), and `VestingNavigator` (cliff/linear vesting) emit no `Onboard` event; each has its own event set (see below).
 
 #### `NavigatorDeployed` (All navigators implementing INavigator)
 
@@ -448,6 +448,8 @@ event Onboard(
 - `daoShipAddress` identifies which DAO this onboarding belongs to
 - Upsert member record for `contributor`
 
+**Other events (optional to index):** `StuckETHRecovered(address indexed to, uint256 amount)` fires when governance recovers ETH stranded by a failed refund via `withdrawStuckETH`. It is not part of normal onboarding — index only if you surface treasury-recovery activity.
+
 #### `Onboard` (ERC20TributeNavigator)
 
 ```solidity
@@ -463,6 +465,8 @@ event Onboard(
 **Handler action:**
 - Same event signature as OnboarderNavigator. `amount` is in ERC20 tokens (not native QUAI)
 - The tribute token address is available from the navigator contract's `tributeToken()` view function (call once at registration time)
+
+**Other events (optional to index):** `StuckTokensRecovered(address indexed token, address indexed to, uint256 amount)` fires when governance recovers mistakenly-sent tokens via `withdrawStuckTokens` — optional, like the Onboarder recovery event above.
 
 **Note:** Both `onboard()` and `onboardWithPermit()` emit the same `Onboard` event. The indexer does not need to distinguish between the two entry points -- the event signature and handler logic are identical regardless of whether the user used standard approve or ERC-2612 permit.
 
@@ -608,6 +612,141 @@ CREATE TABLE ds_signal_votes (
     UNIQUE(navigator_address, poll_id, voter)
 );
 ```
+
+#### `ChangeQueued` / `ChangeExecuted` / `ChangeCancelled` (TimelockNavigator)
+
+`navigatorType = "TimelockNavigator"`. A **GOVERNOR (4)** navigator that wraps `DAOShip.setGovernanceConfig` behind a mandatory delay. **Unlike SignalNavigator this is a permissioned navigator: it IS registered via `setNavigators()`, so a `NavigatorSet(address,4)` event fires and `trust_status` is `sanctioned`.** Discovery is the standard permissioned path (`NavigatorDeployed` for metadata + `NavigatorSet` for registration). It emits no `Onboard` event. Its events:
+
+```solidity
+event ChangeQueued(
+    uint256 indexed changeId,
+    address indexed queuedBy,      // always the DAO avatar (queued via proposal)
+    bytes32 configHash,            // keccak256(governanceConfig)
+    bytes governanceConfig,        // full ABI-encoded config — store it; only the hash is kept on-chain
+    uint64 executableAfter,        // queuedAt + delay
+    uint64 expiresAt               // executableAfter + expiryWindow
+);
+event ChangeExecuted(uint256 indexed changeId, address indexed executor, bytes32 configHash);
+event ChangeCancelled(uint256 indexed changeId, address indexed caller);
+```
+
+**Topic0:**
+- `keccak256("ChangeQueued(uint256,address,bytes32,bytes,uint64,uint64)")`
+- `keccak256("ChangeExecuted(uint256,address,bytes32)")`
+- `keccak256("ChangeCancelled(uint256,address)")`
+
+**`changeId` is per-navigator, not global.** Ids start at 0 and increment within each TimelockNavigator (`changeCount`). Key change rows by `(navigator_address, change_id)`; resolve the DAO from the navigator's `NavigatorDeployed.daoShip`.
+
+**Handler action — `ChangeQueued`:**
+- Insert a change row. **Store the full `governanceConfig` bytes** — only the hash is on-chain, and `executeChange(changeId, governanceConfig)` requires the exact bytes, so the app recovers them from this event. Decode the 7 fields (votingPeriod, gracePeriod, proposalOffering, quorumPercent, sponsorThreshold, minRetentionPercent, defaultExpiryWindow) to render the pending parameters.
+- **Status is time-derived until terminal**, like Signal polls. There is no "became executable" or "expired" event: `queued` while `now < executableAfter`, `executable` while `executableAfter <= now <= expiresAt`, `expired` once `now > expiresAt` — unless an event makes it terminal (`executed` / `cancelled`). The `delay` window is a second ragequit window; surface a countdown to `executableAfter`.
+
+**Handler action — `ChangeExecuted`:** mark the change `executed` (terminal). The config is now live on DAOShip (a `GovernanceConfigSet` fires in the **same transaction** — see bypass detection).
+
+**Handler action — `ChangeCancelled`:** mark the change `cancelled` (terminal). Emitted by `cancelChange` (avatar) or `emergencyCancelAll` (GOVERNOR/avatar — cancels every pending change and pauses; expect a burst of these followed by a `Paused`).
+
+**⚠️ Bypass detection — the key indexer responsibility for this navigator.** The timelock is *advisory*, not enforced on-chain: a proposal can still change governance config directly via `executeAsGovernance` → `setGovernanceConfig`, skipping the timelock entirely (see NAVIGATORS.md → TimelockNavigator). The on-chain tell:
+
+> Every **legitimate** timelocked change emits the timelock's `ChangeExecuted` in the **same transaction** as DAOShip's `GovernanceConfigSet`. A `GovernanceConfigSet` that fires on a DAO which has an **active `TimelockNavigator`** (a registered, non-revoked GOVERNOR navigator of `navigator_type = 'TimelockNavigator'`) **without** a paired `ChangeExecuted` from that navigator in the same tx is a **timelock bypass**.
+
+Flag such `GovernanceConfigSet` events with elevated severity (e.g. `ds_governance_config_history.bypassed_timelock = TRUE`) so the app can surface a warning on that proposal / parameter change. DAOs with no active TimelockNavigator are unaffected (no expectation to route through it).
+
+**Views for backfill:** `queuedChanges(changeId)` (all struct fields), `changeCount`, `isExecutable(changeId)`, and config immutables `delay` / `expiryWindow`.
+
+```sql
+-- TimelockNavigator queued config changes
+CREATE TABLE ds_timelock_changes (
+    id VARCHAR(128) PRIMARY KEY,           -- {navigator_address}-{change_id}
+    dao_id VARCHAR(42) REFERENCES ds_daos(id),
+    navigator_address VARCHAR(42) NOT NULL,
+    change_id NUMERIC(78,0) NOT NULL,      -- per-navigator, starts at 0
+    queued_by VARCHAR(42) NOT NULL,        -- the DAO avatar (always queued via proposal)
+    config_hash VARCHAR(66) NOT NULL,      -- keccak256(governanceConfig)
+    governance_config BYTEA,               -- full ABI-encoded bytes (needed to call executeChange + decode)
+    executable_after BIGINT NOT NULL,
+    expires_at BIGINT NOT NULL,
+    status VARCHAR(16) DEFAULT 'queued',   -- queued|executable|expired (time-derived) | executed|cancelled (terminal)
+    executed_tx VARCHAR(66),
+    cancelled_tx VARCHAR(66),
+    tx_hash VARCHAR(66),                    -- queue tx
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(navigator_address, change_id)
+);
+```
+
+#### `ScheduleCreated` / `TokensClaimed` / `ScheduleRevoked` (VestingNavigator)
+
+`navigatorType = "VestingNavigator"`. A **MANAGER (2)** navigator that vests shares or loot on a cliff + linear schedule, minting incrementally via `claim`. **Permissioned — registered via `setNavigators()`, so `NavigatorSet(address,2)` fires and `trust_status` is `sanctioned`** (standard permissioned discovery). It emits no `Onboard` event; claims mint through DAOShip, so a `MintShares`/`MintLoot` + token `Transfer` fire in the same tx (take **balances** from `Transfer` as usual — `TokensClaimed` is the vesting-activity feed, do not double-count). Its events:
+
+```solidity
+event ScheduleCreated(
+    uint256 indexed scheduleId,
+    address indexed beneficiary,
+    uint256 totalAmount,
+    uint64 startTime,
+    uint64 cliffEnd,
+    uint64 vestingEnd,
+    bool isLoot                    // false = shares, true = loot
+);
+event TokensClaimed(uint256 indexed scheduleId, address indexed beneficiary, uint256 amount, bool isLoot);
+event ScheduleRevoked(uint256 indexed scheduleId, address indexed caller, uint64 revokedAt, uint256 vestedAtRevoke);
+```
+
+**Topic0:**
+- `keccak256("ScheduleCreated(uint256,address,uint256,uint64,uint64,uint64,bool)")`
+- `keccak256("TokensClaimed(uint256,address,uint256,bool)")`
+- `keccak256("ScheduleRevoked(uint256,address,uint64,uint256)")`
+
+**`scheduleId` is per-navigator, not global** (`scheduleCount`, starts at 0). Key by `(navigator_address, schedule_id)`; resolve the DAO from `NavigatorDeployed.daoShip`.
+
+**Handler action — `ScheduleCreated`:** insert a schedule row. `startTime`/`cliffEnd`/`vestingEnd` are absolute timestamps (the contract resolves `startTime == 0` to the creation block before emitting, so the event always carries the concrete value). `isLoot` picks the token kind.
+
+**Handler action — `TokensClaimed`:** `amount` is the **incremental** amount minted in this claim (not cumulative). Increment the schedule's `claimed` by it, and append a claim-feed row. Claims may be partial and repeated as more vests.
+
+**Handler action — `ScheduleRevoked`:** set `revoked = true`, store `revoked_at` and `vested_at_revoke`. Revocation is non-destructive — already-minted tokens stay; future vesting is frozen at `revoked_at`. The beneficiary can still claim up to `vested_at_revoke - claimed`.
+
+**Status / claimable are time-derived** (mirror the contract's `_vestedAmount`): `pending` while `now < cliffEnd`, `vesting` while `cliffEnd <= now < vestingEnd`, `fully_vested` once `now >= vestingEnd`; `revoked` overrides with the freeze at `revoked_at`. `claimable = vested(effectiveEnd) - claimed`, where `effectiveEnd = revoked_at if revoked else now`. Use the `vested(id)` / `claimable(id)` views for exact reconciliation; `getSchedules(beneficiary)` enumerates a member's schedules.
+
+```sql
+-- VestingNavigator schedules
+CREATE TABLE ds_vesting_schedules (
+    id VARCHAR(128) PRIMARY KEY,           -- {navigator_address}-{schedule_id}
+    dao_id VARCHAR(42) REFERENCES ds_daos(id),
+    navigator_address VARCHAR(42) NOT NULL,
+    schedule_id NUMERIC(78,0) NOT NULL,    -- per-navigator, starts at 0
+    beneficiary VARCHAR(42) NOT NULL,
+    total_amount NUMERIC(78,0) NOT NULL,
+    claimed NUMERIC(78,0) DEFAULT '0',     -- cumulative; += each TokensClaimed.amount
+    is_loot BOOLEAN NOT NULL,              -- false = shares, true = loot
+    start_time BIGINT NOT NULL,
+    cliff_end BIGINT NOT NULL,
+    vesting_end BIGINT NOT NULL,
+    revoked BOOLEAN DEFAULT FALSE,
+    revoked_at BIGINT,                      -- vesting freeze point (null until revoked)
+    vested_at_revoke NUMERIC(78,0),         -- from ScheduleRevoked
+    tx_hash VARCHAR(66),                    -- creation tx
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(navigator_address, schedule_id)
+);
+
+-- VestingNavigator claim feed (one row per claim tx)
+CREATE TABLE ds_vesting_claims (
+    id VARCHAR(170) PRIMARY KEY,           -- {navigator_address}-{schedule_id}-{tx_hash}
+    schedule_pk VARCHAR(128) REFERENCES ds_vesting_schedules(id),
+    dao_id VARCHAR(42) REFERENCES ds_daos(id),
+    navigator_address VARCHAR(42) NOT NULL,
+    schedule_id NUMERIC(78,0) NOT NULL,
+    beneficiary VARCHAR(42) NOT NULL,
+    amount NUMERIC(78,0) NOT NULL,         -- incremental amount minted in this claim
+    is_loot BOOLEAN NOT NULL,
+    tx_hash VARCHAR(66),
+    created_at TIMESTAMPTZ
+);
+```
+
+Both navigators also emit `Paused(address)` / `Unpaused(address)` (same handling as the shared section above — update `ds_navigators.paused`).
 
 ---
 
@@ -773,7 +912,7 @@ CREATE TABLE ds_navigators (
     permission_ever_granted BOOLEAN DEFAULT FALSE, -- TRUE once any NavigatorSet(>0) seen; separates revoked (TRUE) from read-only/never-registered (FALSE)
     trust_status VARCHAR(16) DEFAULT 'self_asserted', -- read-only DAO-binding trust: 'sanctioned'|'self_asserted'|'unsanctioned'|'fabricated' (permissioned navs are vouched by NavigatorSet → 'sanctioned')
     is_active BOOLEAN DEFAULT TRUE,        -- functional now? read-only stays TRUE at permission 0; FALSE on revoke. NOT a proxy for "has permission"
-    navigator_type VARCHAR(50),            -- 'OnboarderNavigator', 'ERC20TributeNavigator', 'NFTGatedNavigator', 'SignalNavigator', 'unknown'
+    navigator_type VARCHAR(50),            -- 'OnboarderNavigator', 'ERC20TributeNavigator', 'NFTGatedNavigator', 'SignalNavigator', 'TimelockNavigator', 'VestingNavigator', 'unknown'
     paused BOOLEAN DEFAULT FALSE,
 
     -- Metadata (from NavigatorDeployed event; legacy navigators: navigatorType() RPC only)
@@ -944,6 +1083,28 @@ const HANDLERS: Record<string, { name: string; handler: EventHandler }> = {
     { name: "Voted", handler: handleVoted },
   [id("PollCancelled(uint256,address)")]:
     { name: "PollCancelled", handler: handlePollCancelled },
+
+  // TimelockNavigator events (GOVERNOR; registered via NavigatorSet)
+  [id("ChangeQueued(uint256,address,bytes32,bytes,uint64,uint64)")]:
+    { name: "ChangeQueued", handler: handleChangeQueued },
+  [id("ChangeExecuted(uint256,address,bytes32)")]:
+    { name: "ChangeExecuted", handler: handleChangeExecuted },
+  [id("ChangeCancelled(uint256,address)")]:
+    { name: "ChangeCancelled", handler: handleChangeCancelled },
+
+  // VestingNavigator events (MANAGER; registered via NavigatorSet)
+  [id("ScheduleCreated(uint256,address,uint256,uint64,uint64,uint64,bool)")]:
+    { name: "ScheduleCreated", handler: handleScheduleCreated },
+  [id("TokensClaimed(uint256,address,uint256,bool)")]:
+    { name: "TokensClaimed", handler: handleTokensClaimed },
+  [id("ScheduleRevoked(uint256,address,uint64,uint256)")]:
+    { name: "ScheduleRevoked", handler: handleScheduleRevoked },
+
+  // Shared across all pausable navigators (Onboarder, ERC20Tribute, NFTGated, Timelock, Vesting)
+  [id("Paused(address)")]:
+    { name: "Paused", handler: handleNavigatorPaused },
+  [id("Unpaused(address)")]:
+    { name: "Unpaused", handler: handleNavigatorUnpaused },
 
   // Poster events
   [id("NewPost(address,string,string)")]:
@@ -1277,8 +1438,10 @@ The indexer monitors `DAOShipLauncher` and `DAOShipAndVaultLauncher` for launch 
 | BaseNavigator extraction | v7 L-11 | Shared logic extracted to abstract base. Event signatures unchanged. |
 | DAOShipPermit extraction | v7 L-12 | Shared permit logic extracted. `permit()` signature unchanged. |
 | OnboarderNavigator calldata refactor | v7 L-7 | `onboard(bytes32[])` parameter `memory` → `calldata`. ABI selector unchanged. |
-| withdrawStuckETH nonReentrant | v7 L-8 | Added reentrancy guard. No event changes. |
-| withdrawStuckTokens nonReentrant | v6 | Added reentrancy guard to ERC20TributeNavigator. No event changes. |
+| withdrawStuckETH nonReentrant | v7 L-8 | Added reentrancy guard. |
+| withdrawStuckETH emits event | navigators | New `StuckETHRecovered(address indexed to, uint256 amount)` on OnboarderNavigator. Optional to index (treasury-recovery activity only). |
+| withdrawStuckTokens nonReentrant | v6 | Added reentrancy guard to ERC20TributeNavigator. |
+| withdrawStuckTokens emits event | navigators | New `StuckTokensRecovered(address indexed token, address indexed to, uint256 amount)` on ERC20TributeNavigator. Optional to index. |
 | OnboarderNavigator receive() nonReentrant | v5 C-1 | Added reentrancy guard to `receive()`. No event changes. |
 | getPriorVotes bounds check | v7 L-9 | Reverts with `TimepointOverflow()` for timepoints > uint40 max. |
 | Vault code-size check | v7 L-10 | `launchDAOShipWithVault` rejects EOA vault addresses. |

@@ -1147,16 +1147,16 @@ describe("CoverageGaps", function () {
   });
 
   // ==========================================================================
-  // 13. encodeMultisend on-chain (via DAOShipUtils library)
+  // 13. encodeMultisend on-chain (via MultiSendEncoder library)
   // ==========================================================================
   describe("13. encodeMultisend on-chain", function () {
-    it("Call DAOShipUtils.encodeMultisend, use result as proposalData, process and verify", async function () {
+    it("Call MultiSendEncoder.encodeMultisend, use result as proposalData, process and verify", async function () {
       const { daoShip, deployer, bob } = await loadFixture(deployDAOShipFixture);
       const daoShipAddr = await daoShip.getAddress();
 
-      // Deploy DAOShipUtils library
-      const BaalUtils = await ethers.getContractFactory("DAOShipUtils");
-      const baalUtils = await BaalUtils.deploy();
+      // Deploy MultiSendEncoder library
+      const MultiSendEncoder = await ethers.getContractFactory("MultiSendEncoder");
+      const encoder = await MultiSendEncoder.deploy();
 
       // Build the inner call: setNavigators([bob], [2])
       const setNavigatorCalldata = daoShip.interface.encodeFunctionData("setNavigators", [
@@ -1170,7 +1170,7 @@ describe("CoverageGaps", function () {
       ]);
 
       // Use on-chain encodeMultisend via library to get packed transactions
-      const packedTransactions = await baalUtils.encodeMultisend(
+      const packedTransactions = await encoder.encodeMultisend(
         [daoShipAddr],
         [0],
         [executeAsBaalCalldata]

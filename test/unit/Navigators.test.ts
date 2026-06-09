@@ -1418,3 +1418,19 @@ describe("Navigator Contracts", function () {
     });
   });
 });
+
+describe("Permission-bit ABI stability", function () {
+  // DAOShip and every navigator now source the permission bits from the shared
+  // Permissions library (single source of truth — desync is structurally impossible).
+  // This guards the external ABI values that indexers and integrators depend on:
+  // the canonical bits must stay ADMIN=1 / MANAGER=2 / GOVERNOR=4 / MAX_PERMISSION=7.
+  it("DAOShip re-exports ADMIN=1, MANAGER=2, GOVERNOR=4, MAX_PERMISSION=7", async function () {
+    const DAOShip = await ethers.getContractFactory("DAOShip");
+    const daoImpl = await DAOShip.deploy();
+    await daoImpl.waitForDeployment();
+    expect(await daoImpl.ADMIN()).to.equal(1);
+    expect(await daoImpl.MANAGER()).to.equal(2);
+    expect(await daoImpl.GOVERNOR()).to.equal(4);
+    expect(await daoImpl.MAX_PERMISSION()).to.equal(7);
+  });
+});

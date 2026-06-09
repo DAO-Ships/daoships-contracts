@@ -16,7 +16,9 @@
  *
  * Configuration (.env or .env.e2e):
  *   - DAOSHIP_ADDRESS          (required) deployed DAO clone (not the singleton)
- *   - TIMELOCK_DELAY           (default: 172800)  delay in seconds (1h..30d). 48h default.
+ *   - TIMELOCK_DELAY           (default: 172800)  delay in seconds (10min..30d). 48h default.
+ *                              The 10-minute floor is only a sanity check; a real member
+ *                              exit window needs days — keep this >= 172800 (2 days).
  *   - TIMELOCK_EXPIRY_WINDOW   (default: 604800)  executable window after delay (1h..3650d). 7d default.
  *   - TIMELOCK_NAME / TIMELOCK_DESCRIPTION
  */
@@ -48,10 +50,19 @@ async function main() {
   const daoShipAddress = process.env.DAOSHIP_ADDRESS;
   if (!daoShipAddress) throw new Error("DAOSHIP_ADDRESS not set (deployed DAO clone, not the singleton)");
 
+  const MIN_DELAY = 10 * 60; // 600s — contract sanity floor (matches MIN_DELAY)
+  const RECOMMENDED_DELAY = 2 * DAY; // advisory production minimum (matches RECOMMENDED_DELAY)
   const delay = process.env.TIMELOCK_DELAY || String(2 * DAY);
   const expiryWindow = process.env.TIMELOCK_EXPIRY_WINDOW || String(7 * DAY);
-  if (BigInt(delay) < BigInt(HOUR)) throw new Error("TIMELOCK_DELAY must be >= 3600 (1 hour)");
+  if (BigInt(delay) < BigInt(MIN_DELAY)) throw new Error("TIMELOCK_DELAY must be >= 600 (10 minutes)");
   if (BigInt(delay) > BigInt(30 * DAY)) throw new Error("TIMELOCK_DELAY must be <= 2592000 (30 days)");
+  if (BigInt(delay) < BigInt(RECOMMENDED_DELAY)) {
+    console.warn(
+      `\n   ⚠️  TIMELOCK_DELAY ${delay}s is below the recommended ${RECOMMENDED_DELAY}s (2 days).\n` +
+      `      The floor is only a sanity check — a delay this short is not a meaningful\n` +
+      `      member exit window. Consider >= 2 days for production.\n`
+    );
+  }
   if (BigInt(expiryWindow) < BigInt(HOUR)) throw new Error("TIMELOCK_EXPIRY_WINDOW must be >= 3600 (1 hour)");
   if (BigInt(expiryWindow) > BigInt(3650 * DAY)) throw new Error("TIMELOCK_EXPIRY_WINDOW must be <= 315360000 (3650 days)");
 
