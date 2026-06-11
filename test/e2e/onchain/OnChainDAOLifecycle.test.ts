@@ -371,7 +371,8 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   // proposal. Budget delay*3 + 300s to match the waitForContractClock budget in that test —
   // the EVM clock lags real time on Orchard, so advancing it 600s can take well over 600s.
   const timelockDelayWaitMs = (600 * 3 + 300) * 1000;
-  const dynamicTimeout = (5 * perProposalMs) + baseOverheadMs + timelockDelayWaitMs;
+  // Phase 2h (BudgetNavigator) adds 2 governance proposals (enableModule + createBudget).
+  const dynamicTimeout = (7 * perProposalMs) + baseOverheadMs + timelockDelayWaitMs;
   this.timeout(dynamicTimeout);
 
   let provider: quais.JsonRpcProvider;
@@ -392,6 +393,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   let signalNavigator: quais.Contract; // no-permission, non-binding polls
   let vestingNavigator: quais.Contract; // MANAGER, cliff+linear vesting
   let timelockNavigator: quais.Contract; // GOVERNOR, delayed governance-config changes
+  let budgetNavigator: quais.Contract; // NO permission, vault module — treasury budgets
   let nftGateToken: quais.Contract; // MockERC721 gate collection
   let tributeToken: quais.Contract;
 
@@ -406,6 +408,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   let SignalNavigatorABI: any;
   let VestingNavigatorABI: any;
   let TimelockNavigatorABI: any;
+  let BudgetNavigatorABI: any;
   let MockERC721ABI: any;
   let MockERC20ABI: any;
 
@@ -580,6 +583,12 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     TimelockNavigatorABI = JSON.parse(
       fs.readFileSync(
         path.join(artifactsDir, "navigators/TimelockNavigator.sol/TimelockNavigator.json"),
+        "utf-8"
+      )
+    ).abi;
+    BudgetNavigatorABI = JSON.parse(
+      fs.readFileSync(
+        path.join(artifactsDir, "navigators/BudgetNavigator.sol/BudgetNavigator.json"),
         "utf-8"
       )
     ).abi;
@@ -1009,6 +1018,35 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     const timelockNavigatorAddress = await timelockNavigatorInstance.getAddress();
     console.log(`   ✅ TimelockNavigator: ${timelockNavigatorAddress} (GOVERNOR, delay ${TIMELOCK_DELAY}s)\n`);
     timelockNavigator = timelockNavigatorInstance;
+
+    // Deploy BudgetNavigator for Phase 2h (recurring treasury budgets). Holds NO DAOShip
+    // permission — it is intentionally NOT added to the navigators[] array below. Its only
+    // privilege is vault-module status, which Phase 2h grants via a governance proposal
+    // that calls vault.enableModule (the real self-call path).
+    console.log("   Deploying BudgetNavigator...");
+    const BudgetNavigatorJson = JSON.parse(
+      fs.readFileSync(
+        path.join(__dirname, "../../../artifacts/contracts/navigators/BudgetNavigator.sol/BudgetNavigator.json"),
+        "utf-8"
+      )
+    );
+    const budgetIpfsHash = await pushMetadataWithRetry(BudgetNavigatorJson.bytecode, "BudgetNavigator");
+    const BudgetNavigatorFactory = new quais.ContractFactory(
+      BudgetNavigatorABI,
+      BudgetNavigatorJson.bytecode,
+      deployer,
+      budgetIpfsHash
+    );
+    // BudgetNavigator constructor: daoShip, name, description
+    const budgetNavigatorInstance = await BudgetNavigatorFactory.deploy(
+      predictedDAOShipAddress,
+      "Budget",
+      "recurring treasury budgets"
+    );
+    await budgetNavigatorInstance.waitForDeployment();
+    const budgetNavigatorAddress = await budgetNavigatorInstance.getAddress();
+    console.log(`   ✅ BudgetNavigator: ${budgetNavigatorAddress} (NO permission, vault module)\n`);
+    budgetNavigator = budgetNavigatorInstance;
 
     // Configuration from .env.e2e
     const votingPeriod = parseInt(process.env.VOTING_PERIOD || "3600"); // 1 hour minimum (M-7 fix)
@@ -1758,6 +1796,108 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     expect(await timelockNavigator.isExecutable(changeId!)).to.equal(false);
 
     console.log(`✅ TimelockNavigator delayed config change applied on-chain (GOVERNOR setGovernanceConfig)\n`);
+  });
+
+  it("Should fund a treasury budget via BudgetNavigator (enable module → createBudget → disburse)", async function () {
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("PHASE 2h: Recurring Treasury Budget (BudgetNavigator)");
+    console.log("═══════════════════════════════════════════════════════════\n");
+
+    const budgetAddress = await budgetNavigator.getAddress();
+    const QuaiVaultABI = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "../../../quaiVaultArtifacts/QuaiVault.json"), "utf-8")
+    ).abi;
+    const vaultContract = new quais.Contract(vault, QuaiVaultABI, provider);
+
+    // Inline governance helper: submit → vote → wait voting+grace → process; returns the receipt.
+    async function runProposal(
+      actions: Array<{ operation: number; to: string; value: bigint; data: string }>,
+      title: string,
+      description: string
+    ) {
+      const proposalData = encodeMultiSend(actions);
+      const submitTx = await daoShip.connect(deployer).submitProposal(proposalData, 0, JSON.stringify({ title, description }));
+      const submitReceipt = await submitTx.wait();
+      const proposalEvent = submitReceipt.logs.find((log: any) => {
+        try { return daoShip.interface.parseLog(log)?.name === "SubmitProposal"; } catch { return false; }
+      });
+      const proposalId = daoShip.interface.parseLog(proposalEvent!)?.args[0];
+      console.log(`   ✅ Proposal #${proposalId} submitted (${title})`);
+      await waitPastVotingStarts(provider, daoShip, proposalId, "votingStarts");
+      await (await daoShip.connect(deployer).submitVote(proposalId, true)).wait();
+      await (await daoShip.connect(alice).submitVote(proposalId, true)).wait();
+      const votingPeriod = parseInt(process.env.VOTING_PERIOD || "3600");
+      const gracePeriod = parseInt(process.env.GRACE_PERIOD || "30");
+      await new Promise((resolve) => setTimeout(resolve, (votingPeriod + gracePeriod) * 1000));
+      await waitUntilGraceEnded(provider, daoShip, proposalId);
+      const processTx = await daoShip.connect(deployer).processProposal(proposalId, proposalData);
+      const processReceipt = await processTx.wait();
+      console.log(`   ✅ Processed in block ${processReceipt.blockNumber}\n`);
+      return processReceipt;
+    }
+
+    // 1) Enable BudgetNavigator as a VAULT MODULE via governance. The proposal batch runs
+    //    in the vault's context, so vault.enableModule arrives as msg.sender == vault — the
+    //    real self-call authorization a mock cannot fake. No setNavigators / no permission.
+    expect(await vaultContract.isModuleEnabled(budgetAddress)).to.equal(false);
+    const enableData = vaultContract.interface.encodeFunctionData("enableModule", [budgetAddress]);
+    await runProposal(
+      [{ operation: 0, to: vault, value: 0n, data: enableData }],
+      "Enable BudgetNavigator as vault module",
+      "Grant treasury-disbursement module status (no DAOShip permission)"
+    );
+    expect(await vaultContract.isModuleEnabled(budgetAddress)).to.equal(true);
+    expect(await daoShip.navigators(budgetAddress)).to.equal(0n); // holds NO DAOShip permission
+    console.log("   ✅ BudgetNavigator enabled as a vault module (0 DAOShip permission)\n");
+
+    // 2) Create a small native-QUAI budget via governance (manager = deployer). MIN_PERIOD
+    //    so the whole phase stays inside one period — no on-chain period wait needed.
+    const BUDGET_ALLOWANCE = quais.parseQuai("0.15");
+    const BUDGET_CEILING = quais.parseQuai("0.3");
+    const BUDGET_PERIOD = 3600; // MIN_PERIOD (1 hour)
+    const createData = budgetNavigator.interface.encodeFunctionData("createBudget", [
+      deployer.address, quais.ZeroAddress, BUDGET_ALLOWANCE, BUDGET_CEILING, BUDGET_PERIOD, 0, 0,
+    ]);
+    const createReceipt = await runProposal(
+      [{ operation: 0, to: budgetAddress, value: 0n, data: createData }],
+      "Create treasury budget",
+      "0.15 QUAI/period, 0.3 ceiling, manager = deployer"
+    );
+
+    const avatarAddr = await daoShip.avatar();
+    let budgetId: bigint | undefined;
+    for (const log of createReceipt.logs) {
+      try {
+        const parsed = budgetNavigator.interface.parseLog(log);
+        if (parsed && parsed.name === "BudgetCreated") {
+          budgetId = parsed.args.budgetId;
+          expect(parsed.args.manager.toLowerCase()).to.equal(deployer.address.toLowerCase());
+        }
+      } catch { /* not a BudgetNavigator event */ }
+    }
+    expect(budgetId, "BudgetCreated should be emitted during processing").to.not.be.undefined;
+    console.log(`   ✅ Budget #${budgetId} created by the avatar (${avatarAddr})\n`);
+
+    // 3) Manager disburses real treasury QUAI to Carol (Carol pays no gas → exact delta).
+    const DISBURSE = quais.parseQuai("0.1");
+    const carolBefore = await provider.getBalance(carol.address);
+    const disburseTx = await budgetNavigator.connect(deployer).disburse(budgetId!, carol.address, DISBURSE);
+    await disburseTx.wait();
+    expect((await provider.getBalance(carol.address)) - carolBefore).to.equal(DISBURSE);
+    expect((await budgetNavigator.budgets(budgetId!)).totalSpent).to.equal(DISBURSE);
+    console.log(`   ✅ Disbursed ${quais.formatQuai(DISBURSE)} QUAI from the vault to Carol\n`);
+
+    // 4) The per-period allowance cap is enforced on-chain (0.1 + 0.1 > 0.15 allowance).
+    let capReverted = false;
+    try {
+      const tx = await budgetNavigator.connect(deployer).disburse(budgetId!, carol.address, DISBURSE);
+      await tx.wait();
+    } catch {
+      capReverted = true;
+    }
+    expect(capReverted, "a disburse exceeding the period allowance should revert").to.equal(true);
+
+    console.log(`✅ BudgetNavigator treasury disbursement working on-chain (vault module, cap-bounded)\n`);
   });
 
   it("Should submit, vote, and process funding proposal", async function () {

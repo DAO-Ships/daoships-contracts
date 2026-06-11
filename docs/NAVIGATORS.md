@@ -188,121 +188,28 @@ function emergencyCancelAll() external;
 
 ---
 
-#### BudgetNavigator (MANAGER + Vault Module)
+#### BudgetNavigator (Vault Module) — **SHIPPED**
 
-**What it does:** Governance pre-approves a spending budget (e.g., "50,000 QUAI for Q2 contributor payments"). A designated budget manager can then disburse funds within that budget without individual proposals per payment.
+> **Canonical reference:** [`docs/BUDGET_NAVIGATOR.md`](BUDGET_NAVIGATOR.md) — full ABI, gotchas, and audit sign-off.
 
-**Why DAO Ships needs this:** `executeAsGovernance` can transfer funds, but every transfer requires a full governance proposal (votingPeriod + gracePeriod). At 20 contributor payments/month with 5-day cycles, that is the entire governance bandwidth spent on payroll.
+**What it does:** Governance approves a recurring spending budget (manager, token, per-period allowance, lifetime ceiling) and delegates payout to a per-budget **manager**, who disburses from the treasury **without a proposal per payment**. The DAOShips analogue of the Gnosis/Safe Allowance Module.
 
-**Why it matters at 1000+ members:** At 1000 members with 10% quorum, you need 100 voters per proposal. 20 payment proposals/month = 2000 vote-actions for payroll alone. BudgetNavigator reduces this to 1 quarterly budget approval -- a 95% reduction in governance overhead.
+**Why DAO Ships needs this:** `executeAsGovernance` can transfer funds, but every transfer needs a full proposal (votingPeriod + gracePeriod). At 20 contributor payments/month that is the entire governance bandwidth spent on payroll. A budget reduces it to one approval per budget.
 
-**Permission:** MANAGER (2) for share/loot minting if compensation includes tokens. Also needs vault module status for direct treasury disbursement.
+**Permission:** **None on DAOShip.** Unlike the original sketch, the shipped navigator is **treasury-disbursement only** — it never mints, so it holds no MANAGER bit. Its sole privilege is being an **enabled vault module** (`IAvatar.execTransactionFromModule`). Paying contributors in shares/loot on a schedule is VestingNavigator's job; keeping the two separate halves the blast radius (Budget can drain the treasury but never dilute the cap table).
 
-**Urgency:** Blocking for any DAO with regular operational spending (Community, Protocol).
+**Architecture (module + allowance):** The navigator holds no funds — each disbursement pulls from the vault per-transfer, bounded by per-budget caps enforced entirely in the contract, so treasury assets stay in vault custody (ragequit still reaches the remainder) until payout. Two manager-gated rails: `disburse(id, to, amount)` (discretionary) and `disburseBatch(id, to[], amounts[])` (payroll), both checked against `allowancePerPeriod` (resets each period, lazily — no keeper) and `totalCeiling` (lifetime). `createBudget`/`updateManager`/`cancelBudget` are avatar-only; `pause`/`unpause` (GOVERNOR navigator or avatar) freeze all outflows as the emergency brake. Disbursement copies the audited `ragequit` path (`Operation.Call` hardcoded — no DelegateCall).
 
-**Architecture:** Two-level budget system: **budget schedules** (governance-approved overall spending plans) containing **allocation periods** (recurring cycles for payroll and discretionary spending). The navigator needs dual authority: MANAGER permission on DAOShip (for token compensation) and enabled module on the vault (for treasury disbursement via `IAvatar.execTransactionFromModule`). Funds never leave the vault until disbursement.
+> **⚠️ The vault grants a module unbounded transfer power.** The vault enforces no per-module limit, so this contract's caps are the treasury's only on-chain guarantee. A compromised *manager* is bounded to its budget's period allowance + ceiling; a *bug in this contract* risks the whole treasury — hence the minimal surface and treasury-grade audit. Recourse escalates: `pause` → `cancelBudget` → `vault.disableModule`.
 
-**State variables:**
+**Wiring:** deploy → one proposal calling `vault.enableModule(budgetNav)` (the self-call path; **no `setNavigators`**) → proposals calling `createBudget(...)`.
 
-```solidity
-DAOShip public immutable daoShip;
+**Tests:**
+- **Unit** — `test/unit/BudgetNavigator.test.ts` (28 passing). Constructor bounds, createBudget validation, native + ERC20 disburse, both caps (single + batch), lazy period reset across one and multiple skipped periods, batch revert paths, CEI counter-rollback on a failed transfer, `NotEnabledModule`, manager/avatar/governor authorization, updateManager, cancel, pause-freezes-both-rails, and view robustness.
+- **Local E2E** — `test/e2e/local/BudgetNavigator.e2e.test.ts` (2 passing). Real DAOShip + vault: a governance proposal **enabling the navigator as a vault module** (self-call `enableModule`), a proposal creating budgets, the manager disbursing real native + ERC20 treasury funds within caps with the lazy period reset, and cancel-via-proposal halting payout.
+- **Onchain E2E** — Phase 2h in `test/e2e/onchain/OnChainDAOLifecycle.test.ts` (Cyprus1/Orchard). Enables the module via a real proposal (validates the vault self-call), creates a budget via proposal (arrives as `msg.sender == avatar`), disburses real treasury QUAI through the vault module path, and asserts the per-period allowance cap on-chain.
 
-struct PayrollEntry {
-    address recipient;
-    uint256 amountPerPeriod;
-    bool active;
-}
-
-struct BudgetSchedule {
-    address manager;
-    address token;               // ERC20 address (address(0) for native token)
-    uint256 totalCeiling;        // max total spending (0 = uncapped)
-    uint256 totalSpent;
-    uint64 startsAt;
-    uint64 endsAt;               // 0 = perpetual until cancelled
-    uint64 allocationPeriod;     // period length in seconds
-    uint64 lastPayrollExecution;
-    uint256 discretionaryPerPeriod;
-    uint256 discretionarySpentThisPeriod;
-    uint64 currentPeriodStart;
-    bool cancelled;
-    string description;
-}
-
-uint256 public scheduleCount;
-mapping(uint256 => BudgetSchedule) public schedules;
-mapping(uint256 => PayrollEntry[]) public payroll;
-bool public paused;
-```
-
-**Constructor:** `address _daoShip`. Schedules are created dynamically via governance.
-
-**Key functions:**
-
-```solidity
-function createSchedule(
-    address manager, address token, uint256 totalCeiling,
-    uint64 startsAt, uint64 endsAt, uint64 allocationPeriod,
-    uint256 discretionaryPerPeriod, string calldata description,
-    address[] calldata payrollRecipients, uint256[] calldata payrollAmounts
-) external returns (uint256 scheduleId);
-
-function executePayroll(uint256 scheduleId) external;
-function disburse(uint256 scheduleId, address to, uint256 amount) external;
-function disburseBatch(uint256 scheduleId, address[] calldata to, uint256[] calldata amounts) external;
-function updatePayroll(uint256 scheduleId, uint256 entryIndex, address recipient, uint256 amountPerPeriod, bool active) external;
-function cancelSchedule(uint256 scheduleId) external;
-
-function discretionaryRemaining(uint256 scheduleId) external view returns (uint256);
-function totalRemaining(uint256 scheduleId) external view returns (uint256);
-function payrollReady(uint256 scheduleId) external view returns (bool);
-```
-
-- `createSchedule` -- avatar only (via proposal).
-- `executePayroll` -- permissionless (anyone, including bots). Iterates active payroll entries, transfers each via `execTransactionFromModule`. Resets discretionary spend and advances period.
-- `disburse` -- manager only, within period ceiling and total ceiling.
-- Period advancement happens inside `executePayroll`. If payroll is not executed, the discretionary manager keeps spending against the old period's allocation (not accumulating multiple periods).
-- Each schedule is for a single token. Create multiple schedules for multiple tokens via batched governance proposals.
-
-**Example: Q2 2026 Budget**
-
-```
-Schedule: "Q2 2026 Operations"
-Token: QUAI (address(0)), Total ceiling: 150,000 QUAI
-Starts: April 1, Ends: June 30, Allocation period: 30 days
-Discretionary per period: 5,000 QUAI, Manager: ops-lead.eth
-Payroll: Alice 10K, Bob 8K, Carol 6K, Dave 4K (monthly)
-
-Monthly flow:
-  1. Anyone calls executePayroll() -> 28,000 QUAI auto-disbursed
-  2. Ops lead disburses within 5,000 QUAI discretionary
-  3. Total: ~33,000/month x 3 months = 99,000 QUAI
-  4. Remaining ceiling: 51,000 QUAI buffer
-```
-
-**Events:** `ScheduleCreated`, `PayrollExecuted`, `Disbursed`, `PayrollUpdated`, `ScheduleCancelled`, `Paused`, `Unpaused`.
-
-**Custom errors:** `InvalidConfig`, `NotAuthorized`, `IsPaused`, `ScheduleExpired`, `ScheduleNotStarted`, `ScheduleCancelledError`, `DiscretionaryExceeded`, `TotalCeilingExceeded`, `PayrollNotReady`, `LengthMismatch`, `ZeroAmount`, `TransferFailed`, `InvalidPayrollIndex`.
-
-**Test scenarios:**
-
-1. Happy path payroll: create schedule, advance one period, executePayroll, verify amounts
-2. Happy path discretionary: manager disburses within ceiling
-3. Discretionary resets on new period
-4. Revert: payroll too early -> `PayrollNotReady`
-5. Revert: discretionary exceeded -> `DiscretionaryExceeded`
-6. Revert: total ceiling exceeded -> `TotalCeilingExceeded`
-7. Revert: non-manager disburse -> `NotAuthorized`
-8. Revert: expired schedule -> `ScheduleExpired`
-9. Cancel: avatar cancels, payroll and disburse revert
-10. Update payroll: add recipient mid-schedule
-11. Deactivate payroll entry: set active=false, skipped next execution
-12. Permissionless payroll: non-member calls executePayroll -> succeeds
-13. Multiple schedules: QUAI and USDC operate independently
-14. Perpetual schedule: endsAt=0, runs until cancelled
-15. Batch discretionary: 10 recipients in one call
-
-**Estimated size:** ~280 lines of Solidity.
+**Status:** Shipped. Contract `contracts/navigators/BudgetNavigator.sol` (~290 lines incl. NatSpec), deploy script `scripts/deploy/009_deploy_budget_navigator.ts`. Enabled as a vault module via a governance proposal (no DAOShip permission).
 
 ---
 
@@ -824,7 +731,7 @@ function isDelinquent(address member) external view returns (bool);
 | Phase | Navigators | Enables |
 |-------|---------|---------|
 | **v1.0 (shipped)** | OnboarderNavigator, ERC20TributeNavigator | Startup, Community, Agent DAOs |
-| **v1.1** | TimelockNavigator (**shipped**), BudgetNavigator | Protocol, Investment DAOs |
+| **v1.1** | TimelockNavigator (**shipped**), BudgetNavigator (**shipped**) | Protocol, Investment DAOs |
 | **v1.2** | SignalNavigator (**shipped**), DelegateRegistryNavigator, NFTGatedNavigator (**shipped**) | 200+ member governance, credential-gated DAOs |
 | **v2.0** | VestingNavigator (**shipped**), CircuitBreakerNavigator | Core contributor compensation, safety automation |
 | **v2.1** | OracleNavigator, SubscriptionNavigator | Adaptive governance, recurring fees |
@@ -835,7 +742,7 @@ function isDelinquent(address member) external view returns (bool);
 |--------|---------|-----------|----------|------------|-------|--------|
 | OnboarderNavigator | Required | Required | Required | Required | Required | **Shipped** |
 | ERC20TributeNavigator | Optional | Required | Required | Required | -- | **Shipped** |
-| BudgetNavigator | -- | Critical | Critical | -- | Critical | **Not built** |
+| BudgetNavigator | -- | Critical | Critical | -- | Critical | **Shipped** |
 | SignalNavigator | -- | Useful | Critical | -- | -- | **Shipped** |
 | TimelockNavigator | -- | -- | Critical | Critical | -- | **Shipped** |
 | VestingNavigator | -- | Useful | Critical | -- | -- | **Shipped** |
@@ -855,7 +762,7 @@ function isDelinquent(address member) external view returns (bool);
 | OnboarderNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | Shipped |
 | ERC20TributeNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | Shipped |
 | TimelockNavigator | GOVERNOR (4) | `setGovernanceConfig` | No | Shipped |
-| BudgetNavigator | MANAGER (2) | `mintShares`, `mintLoot` (optional) | Yes | ~280 |
+| BudgetNavigator | None (vault module) | none — disburses treasury via `execTransactionFromModule` | Yes | Shipped |
 | SignalNavigator | None | None (reads only) | No | Shipped |
 | DelegateRegistryNavigator | None | None (reads only) | No | ~120 |
 | VestingNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | Shipped |

@@ -402,7 +402,7 @@ event DelegateVotesChanged(address delegate, uint256 previousBalance, uint256 ne
 
 ### 4. Navigator Events
 
-Emitted by navigator contracts (OnboarderNavigator, ERC20TributeNavigator, NFTGatedNavigator, SignalNavigator, TimelockNavigator, VestingNavigator). All navigators implement `INavigator` and emit `NavigatorDeployed` at construction time. Note that not every navigator is an *onboarding* navigator — `SignalNavigator` (polls), `TimelockNavigator` (config delay), and `VestingNavigator` (cliff/linear vesting) emit no `Onboard` event; each has its own event set (see below).
+Emitted by navigator contracts (OnboarderNavigator, ERC20TributeNavigator, NFTGatedNavigator, SignalNavigator, TimelockNavigator, VestingNavigator, BudgetNavigator). All navigators implement `INavigator` and emit `NavigatorDeployed` at construction time. Note that not every navigator is an *onboarding* navigator — `SignalNavigator` (polls), `TimelockNavigator` (config delay), `VestingNavigator` (cliff/linear vesting), and `BudgetNavigator` (treasury budgets) emit no `Onboard` event; each has its own event set (see below).
 
 #### `NavigatorDeployed` (All navigators implementing INavigator)
 
@@ -747,6 +747,90 @@ CREATE TABLE ds_vesting_claims (
 ```
 
 Both navigators also emit `Paused(address)` / `Unpaused(address)` (same handling as the shared section above — update `ds_navigators.paused`).
+
+---
+
+#### `BudgetCreated` / `Disbursed` / `ManagerUpdated` / `BudgetCancelled` (BudgetNavigator)
+
+`navigatorType = "BudgetNavigator"`. A treasury-disbursement navigator: governance approves a recurring budget (per-budget manager, per-period allowance, lifetime ceiling) and the manager pays out from the **vault** without a proposal per payment. It mints nothing.
+
+**⚠️ New discovery + trust case — read this.** BudgetNavigator holds **NO DAOShip permission**, so — like SignalNavigator — **it never fires `NavigatorSet`**. But it is **NOT a read-only navigator**, so the read-only Poster `daoships.dao.navigators` sanctioning path does **not** apply to it either. Its authority is **vault module status**, and its trust signal is **on-chain and authenticated**: the DAO's **vault** emits `EnabledModule(budgetNav)` when a governance proposal grants it. That is the strongest possible signal — it is the actual capability grant, gated by the vault (`msg.sender == vault`), unforgeable. Therefore:
+
+- Discover the navigator from `NavigatorDeployed` (metadata + self-asserted DAO binding), as for every navigator.
+- **Watch the DAO's vault** (the `vault` address from `LaunchDAOShipAndVault`) for the Zodiac module events and use them as the trust + active-state source:
+
+```solidity
+event EnabledModule(address indexed module);   // QuaiVault / IAvatar
+event DisabledModule(address indexed module);
+```
+
+**Topic0:** `keccak256("EnabledModule(address)")`, `keccak256("DisabledModule(address)")`.
+
+- On `EnabledModule(budgetNav)` from a DAO's vault → set the navigator `trust_status = 'sanctioned'` and `is_active = true` (it can now move treasury funds). On `DisabledModule(budgetNav)` → `trust_status = 'unsanctioned'`, `is_active = false`. A BudgetNavigator that has **never** been enabled on its claimed DAO's vault is `self_asserted` — show no budgets/disbursements from it in default views; it cannot actually move funds until enabled. (You may also confirm current state at any time via `vault.isModuleEnabled(budgetNav)`.)
+
+Its own events:
+
+```solidity
+event BudgetCreated(uint256 indexed budgetId, address indexed manager, address token,
+                    uint256 allowancePerPeriod, uint256 totalCeiling,
+                    uint64 periodLength, uint64 startsAt, uint64 endsAt);   // token: 0x0 = native QUAI
+event Disbursed(uint256 indexed budgetId, address indexed to, address token, uint256 amount);
+event ManagerUpdated(uint256 indexed budgetId, address indexed oldManager, address indexed newManager);
+event BudgetCancelled(uint256 indexed budgetId, address indexed caller);
+```
+
+**Topic0:**
+- `keccak256("BudgetCreated(uint256,address,address,uint256,uint256,uint64,uint64,uint64)")`
+- `keccak256("Disbursed(uint256,address,address,uint256)")`
+- `keccak256("ManagerUpdated(uint256,address,address)")`
+- `keccak256("BudgetCancelled(uint256,address)")`
+
+**`budgetId` is per-navigator, not global** (`budgetCount`, starts at 0). Key by `(navigator_address, budget_id)`; resolve the DAO from `NavigatorDeployed.daoShip`.
+
+**Handler action — `BudgetCreated`:** insert a budget row. `startsAt` is absolute (the contract resolves `startTime == 0` to the creation block before emitting). `endsAt == 0` means perpetual; `token == 0x0` means native QUAI.
+
+**Handler action — `Disbursed`:** append a disbursement-feed row (one row per recipient — `disburse` emits one, `disburseBatch` emits N). Each disbursement also moves value out of the vault (a native transfer or an ERC20 `Transfer` **from the vault**); take balances from the token `Transfer` and treat `Disbursed` as the budget-activity feed (don't double-count). `spent_this_period` and `total_spent` are best maintained from the navigator's `budgets(id)` view or by summing `Disbursed`, since the on-chain `spentThisPeriod` resets lazily.
+
+**Handler action — `ManagerUpdated`:** update the budget's `manager`. **`BudgetCancelled`:** set `cancelled = true` (irreversible; halts disbursement). Also emits `Paused(address)` / `Unpaused(address)` — same handling as the shared section (update `ds_navigators.paused`); note that for this navigator pause freezes **all disbursement**, not just creation.
+
+**Period / remaining are time-derived** (mirror the contract): a budget is `active` while `now >= startsAt && (endsAt == 0 || now < endsAt) && !cancelled`. `remainingThisPeriod` resets every `periodLength` (lazily on-chain); reconcile exact values via the `remainingThisPeriod(id)` / `remainingTotal(id)` views rather than trusting a possibly-stale stored `spent_this_period`.
+
+```sql
+-- BudgetNavigator budgets
+CREATE TABLE ds_budgets (
+    id VARCHAR(128) PRIMARY KEY,           -- {navigator_address}-{budget_id}
+    dao_id VARCHAR(42) REFERENCES ds_daos(id),
+    navigator_address VARCHAR(42) NOT NULL,
+    budget_id NUMERIC(78,0) NOT NULL,      -- per-navigator, starts at 0
+    manager VARCHAR(42) NOT NULL,
+    token VARCHAR(42) NOT NULL,            -- 0x0000...0000 = native QUAI
+    allowance_per_period NUMERIC(78,0) NOT NULL,
+    total_ceiling NUMERIC(78,0) NOT NULL,
+    total_spent NUMERIC(78,0) DEFAULT '0', -- cumulative; += each Disbursed.amount
+    period_length BIGINT NOT NULL,
+    starts_at BIGINT NOT NULL,
+    ends_at BIGINT NOT NULL,               -- 0 = perpetual
+    cancelled BOOLEAN DEFAULT FALSE,
+    tx_hash VARCHAR(66),                   -- creation tx
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(navigator_address, budget_id)
+);
+
+-- BudgetNavigator disbursement feed (one row per recipient per disburse/disburseBatch)
+CREATE TABLE ds_budget_disbursements (
+    id VARCHAR(180) PRIMARY KEY,           -- {navigator_address}-{budget_id}-{tx_hash}-{log_index}
+    budget_pk VARCHAR(128) REFERENCES ds_budgets(id),
+    dao_id VARCHAR(42) REFERENCES ds_daos(id),
+    navigator_address VARCHAR(42) NOT NULL,
+    budget_id NUMERIC(78,0) NOT NULL,
+    recipient VARCHAR(42) NOT NULL,
+    token VARCHAR(42) NOT NULL,
+    amount NUMERIC(78,0) NOT NULL,
+    tx_hash VARCHAR(66),
+    created_at TIMESTAMPTZ
+);
+```
 
 ---
 
@@ -1420,6 +1504,7 @@ The indexer monitors `DAOShipLauncher` and `DAOShipAndVaultLauncher` for launch 
 |--------|--------|------------|
 | **New: SignalNavigator (read-only polls)** | New navigator type emitting `PollCreated` / `Voted` / `PollCancelled`. Holds **no permission**, so it **never fires `NavigatorSet`** — an indexer that registers navigators only from `NavigatorSet` will index zero polls. | Discover it from `NavigatorDeployed` and route monitoring by `navigatorType` (see [Permissionless (read-only) navigators](#permissionless-read-only-navigators)). Add the three topic0 handlers and the `ds_signal_polls` / `ds_signal_votes` tables. Loot is excluded from tallies — `weight` is share power at `votingStarts - 1`. |
 | **New: NFTGatedNavigator** | New navigator type emitting the standard `Onboard` **plus** `NFTClaimed(address,address,uint256,uint256,uint256)`. Registered normally via `NavigatorSet`. | Add the `NFTClaimed` topic0 handler and `ds_nft_claims` table (see §4). No change to the generic `Onboard` path. |
+| **New: BudgetNavigator (treasury budgets)** | New navigator type emitting `BudgetCreated` / `Disbursed` / `ManagerUpdated` / `BudgetCancelled`. Holds **no DAOShip permission** (never fires `NavigatorSet`) but is **not read-only** — its authority is **vault module status**, signalled by the vault's `EnabledModule` event, not by `NavigatorSet` or Poster sanctioning. | Discover from `NavigatorDeployed`; **additionally watch the DAO's vault for `EnabledModule` / `DisabledModule`** to drive `trust_status`/`is_active`. Add the four topic0 handlers and the `ds_budgets` / `ds_budget_disbursements` tables (see §4). |
 | **`state()` now returns Expired for unsponsored expired proposals (v6)** | Previously, an unsponsored proposal past its explicit expiration returned `Submitted (1)`. Now correctly returns `Expired (8)`. | If the indexer calls `state()` to display proposal status, expired unsponsored proposals will now show as Expired instead of Submitted. No code change needed unless the indexer had a workaround for the old behavior. |
 | **Defeated proposals require empty calldata (v6)** | `processProposal(id, proposalData)` now reverts with `HashMismatch()` if `proposalData` is non-empty for a Defeated proposal. Previously accepted any data. | If the indexer or a keeper bot calls `processProposal` to close defeated proposals, pass `"0x"` (empty bytes) as `proposalData`. Non-empty data will revert. |
 | **OOG grief protection (v5)** | If `processProposal` catches an OOG revert and `gasleft() < 50,000`, the entire transaction reverts with `InsufficientProcessGas()` instead of marking `actionFailed=true`. The proposal stays in Ready state. | If the indexer monitors for failed `processProposal` transactions, distinguish `InsufficientProcessGas` (proposal still Ready, can be retried with more gas) from `actionFailed=true` in `ProcessProposal` event (proposal permanently consumed). |

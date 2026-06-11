@@ -24,14 +24,19 @@ contract MockAvatar is IAvatar {
     }
 
     /// @notice Enable a module
+    /// @dev Authorized either by the owner (test convenience) or by the avatar itself
+    ///      (msg.sender == address(this)) — the latter mirrors the real Quai Vault /
+    ///      Gnosis Safe, where an enabled module enables another via a self-call routed
+    ///      through MultiSend (e.g. a DAOShip governance proposal enabling a navigator
+    ///      as a treasury module).
     function enableModule(address module) external override {
-        require(msg.sender == owner, "MockAvatar: not owner");
+        require(msg.sender == owner || msg.sender == address(this), "MockAvatar: not authorized");
         modules[module] = true;
     }
 
     /// @notice Disable a module
     function disableModule(address, address module) external override {
-        require(msg.sender == owner, "MockAvatar: not owner");
+        require(msg.sender == owner || msg.sender == address(this), "MockAvatar: not authorized");
         modules[module] = false;
     }
 
