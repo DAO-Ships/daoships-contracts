@@ -402,7 +402,7 @@ event DelegateVotesChanged(address delegate, uint256 previousBalance, uint256 ne
 
 ### 4. Navigator Events
 
-Emitted by navigator contracts (OnboarderNavigator, ERC20TributeNavigator, NFTGatedNavigator, SignalNavigator, TimelockNavigator, VestingNavigator, BudgetNavigator). All navigators implement `INavigator` and emit `NavigatorDeployed` at construction time. Note that not every navigator is an *onboarding* navigator — `SignalNavigator` (polls), `TimelockNavigator` (config delay), `VestingNavigator` (cliff/linear vesting), and `BudgetNavigator` (treasury budgets) emit no `Onboard` event; each has its own event set (see below).
+Emitted by navigator contracts (OnboarderNavigator, ERC20TributeNavigator, NFTGatedNavigator, SignalNavigator, TimelockNavigator, VestingNavigator, BudgetNavigator, SubscriptionNavigator). All navigators implement `INavigator` and emit `NavigatorDeployed` at construction time. Note that not every navigator is an *onboarding* navigator — `SignalNavigator` (polls), `TimelockNavigator` (config delay), `VestingNavigator` (cliff/linear vesting), `BudgetNavigator` (treasury budgets), and `SubscriptionNavigator` (recurring dues) emit no `Onboard` event; each has its own event set (see below).
 
 #### `NavigatorDeployed` (All navigators implementing INavigator)
 
@@ -834,6 +834,87 @@ CREATE TABLE ds_budget_disbursements (
 
 ---
 
+#### `MemberEnrolled` / `FeePaid` / `FeeCollected` (SubscriptionNavigator)
+
+`navigatorType = "SubscriptionNavigator"`. A **MANAGER (2)** navigator for recurring membership dues: members pull-pay periodic fees (in a governance-set menu of native QUAI / ERC20 tokens) to the **vault**, and once a member is past grace **anyone** may `collectFee(member)` to strip their shares (converted to loot, or burned) for a small loot keeper reward. **Permissioned — registered via `setNavigators()`, so `NavigatorSet(address,2)` fires and `trust_status` is `sanctioned`** (standard permissioned discovery). It emits no `Onboard` event.
+
+**Token-balance changes come from the core events, not from these — do not double-count.** `payFee` moves the fee **into** the vault (an ERC20 `Transfer` to the vault, or a native transfer). `collectFee` removes the member's shares through DAOShip, so the same tx carries either a `ConvertSharesToLoot` (convert mode → shares `Transfer`→0 + loot `Transfer`←0) or a `BurnShares` (burn mode), plus a `MintLoot` for the keeper reward. Take **balances** from those Transfer/mint/burn events as usual; treat `FeePaid` / `FeeCollected` as the subscription-activity feeds.
+
+```solidity
+event MemberEnrolled(address indexed member, uint256 paidThrough);
+event FeePaid(address indexed member, address indexed payer, address indexed token,
+              uint256 amount, uint256 periods, uint256 paidThrough);  // token: 0x0 = native QUAI
+event FeeCollected(address indexed member, address indexed collector,
+                   uint256 sharesRemoved, uint256 reward, bool burned); // burned: true=burn, false=convert-to-loot
+```
+
+**Topic0:**
+- `keccak256("MemberEnrolled(address,uint256)")`
+- `keccak256("FeePaid(address,address,address,uint256,uint256,uint256)")`
+- `keccak256("FeeCollected(address,address,uint256,uint256,bool)")`
+
+**Membership is keyed by `(navigator_address, member)`** — there is no per-member id; `paidThrough` is the whole state (`paidThrough == 0` ⇒ not enrolled, or collected/un-enrolled). Resolve the DAO from `NavigatorDeployed.daoShip`.
+
+**Handler action — `MemberEnrolled`:** upsert the member row, setting `paid_through` to the event value. Fired on governance `enroll`/`enrollBatch` and for `_initialMembers` at construction (the complimentary-period grant). A member's **first `payFee`** self-enrolls **without** a `MemberEnrolled` event — so also upsert the member row on `FeePaid` (below).
+
+**Handler action — `FeePaid`:** set the member's `paid_through` to the event's `paidThrough` (it is the new absolute value — do **not** add to it), upsert-creating the member row if absent (self-enroll). Append one `ds_subscription_payments` feed row and flag the member dirty. `token == 0x0` is native QUAI. **`amount` is per-payment; derive the member's cumulative `total_paid` by SUM over the payments feed at end-of-range — do NOT `+=` inline in the handler** (replay/reorg double-counts — see the cumulative-counter rule, same pattern as Vesting `claimed` / Budget `total_spent`).
+
+**Handler action — `FeeCollected`:** set the member's `paid_through = 0` (collection un-enrolls them) and `last_collected_at`. Append one `ds_subscription_collections` feed row (`shares_removed`, `reward`, `burned`). Cumulative collected totals (if surfaced) are likewise a **SUM over the feed**, never an inline `+=`.
+
+**Status is time-derived** (mirror the contract). With `pt = paid_through` and `grace = graceDuration` (read once from the navigator, immutable): `not_enrolled` if `pt == 0`; else `current` while `now <= pt`, `grace` while `pt < now <= pt + grace`, `delinquent` once `now > pt + grace` (collectible). The fee menu is immutable — read `getAcceptedTokens()` / `feePerPeriod(token)` once at discovery; `quote(periods, token)` reconciles cost. **Trust is mandatory in the UI:** dues/collection actions touch the cap table, so default views to `trust_status = 'sanctioned'` only.
+
+```sql
+-- SubscriptionNavigator membership (one row per member per navigator)
+CREATE TABLE ds_subscription_members (
+    id VARCHAR(128) PRIMARY KEY,           -- {navigator_address}-{member}
+    dao_id VARCHAR(42) REFERENCES ds_daos(id),
+    navigator_address VARCHAR(42) NOT NULL,
+    member VARCHAR(42) NOT NULL,
+    paid_through BIGINT DEFAULT 0,         -- absolute ts paid through; 0 = not enrolled / collected
+    total_paid NUMERIC(78,0) DEFAULT '0',  -- RECOMPUTE by SUM(ds_subscription_payments.amount); never += inline
+    last_collected_at TIMESTAMPTZ,
+    tx_hash VARCHAR(66),                   -- enrollment/first-payment tx
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(navigator_address, member)
+);
+
+-- SubscriptionNavigator payment feed (one row per FeePaid)
+CREATE TABLE ds_subscription_payments (
+    id VARCHAR(180) PRIMARY KEY,           -- {navigator_address}-{member}-{tx_hash}-{log_index}
+    member_pk VARCHAR(128) REFERENCES ds_subscription_members(id),
+    dao_id VARCHAR(42) REFERENCES ds_daos(id),
+    navigator_address VARCHAR(42) NOT NULL,
+    member VARCHAR(42) NOT NULL,
+    payer VARCHAR(42) NOT NULL,            -- payFeeFor → differs from member
+    token VARCHAR(42) NOT NULL,            -- 0x0000...0000 = native QUAI
+    amount NUMERIC(78,0) NOT NULL,         -- per-payment; SUM for cumulative
+    periods NUMERIC(78,0) NOT NULL,
+    paid_through BIGINT NOT NULL,          -- member's new paid_through after this payment
+    tx_hash VARCHAR(66),
+    created_at TIMESTAMPTZ
+);
+
+-- SubscriptionNavigator collection feed (one row per FeeCollected)
+CREATE TABLE ds_subscription_collections (
+    id VARCHAR(180) PRIMARY KEY,           -- {navigator_address}-{member}-{tx_hash}-{log_index}
+    member_pk VARCHAR(128) REFERENCES ds_subscription_members(id),
+    dao_id VARCHAR(42) REFERENCES ds_daos(id),
+    navigator_address VARCHAR(42) NOT NULL,
+    member VARCHAR(42) NOT NULL,
+    collector VARCHAR(42) NOT NULL,
+    shares_removed NUMERIC(78,0) NOT NULL,
+    reward NUMERIC(78,0) NOT NULL,         -- loot minted to collector
+    burned BOOLEAN NOT NULL,               -- true = burnShares, false = convertSharesToLoot
+    tx_hash VARCHAR(66),
+    created_at TIMESTAMPTZ
+);
+```
+
+Also emits `Paused(address)` / `Unpaused(address)` — same handling as the shared section (update `ds_navigators.paused`); for this navigator pause freezes payFee, enroll, **and** collectFee.
+
+---
+
 ### 5. Poster Events (EIP-3722)
 
 #### `NewPost`
@@ -1184,7 +1265,25 @@ const HANDLERS: Record<string, { name: string; handler: EventHandler }> = {
   [id("ScheduleRevoked(uint256,address,uint64,uint256)")]:
     { name: "ScheduleRevoked", handler: handleScheduleRevoked },
 
-  // Shared across all pausable navigators (Onboarder, ERC20Tribute, NFTGated, Timelock, Vesting)
+  // BudgetNavigator events (no permission; trust from the vault's EnabledModule/DisabledModule)
+  [id("BudgetCreated(uint256,address,address,uint256,uint256,uint64,uint64,uint64)")]:
+    { name: "BudgetCreated", handler: handleBudgetCreated },
+  [id("Disbursed(uint256,address,address,uint256)")]:
+    { name: "Disbursed", handler: handleDisbursed },
+  [id("ManagerUpdated(uint256,address,address)")]:
+    { name: "ManagerUpdated", handler: handleManagerUpdated },
+  [id("BudgetCancelled(uint256,address)")]:
+    { name: "BudgetCancelled", handler: handleBudgetCancelled },
+
+  // SubscriptionNavigator events (MANAGER; registered via NavigatorSet)
+  [id("MemberEnrolled(address,uint256)")]:
+    { name: "MemberEnrolled", handler: handleMemberEnrolled },
+  [id("FeePaid(address,address,address,uint256,uint256,uint256)")]:
+    { name: "FeePaid", handler: handleFeePaid },
+  [id("FeeCollected(address,address,uint256,uint256,bool)")]:
+    { name: "FeeCollected", handler: handleFeeCollected },
+
+  // Shared across all pausable navigators (Onboarder, ERC20Tribute, NFTGated, Timelock, Vesting, Budget, Subscription)
   [id("Paused(address)")]:
     { name: "Paused", handler: handleNavigatorPaused },
   [id("Unpaused(address)")]:

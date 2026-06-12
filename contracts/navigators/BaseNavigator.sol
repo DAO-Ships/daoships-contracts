@@ -153,11 +153,20 @@ abstract contract BaseNavigator is ReentrancyGuard, INavigator {
      * @param proof Merkle proof for allowlist verification
      */
     function _checkAllowlist(bytes32[] memory proof) internal view {
-        if (allowlistRoot != bytes32(0)) {
-            if (!MerkleProof.verify(proof, allowlistRoot, keccak256(bytes.concat(keccak256(abi.encode(msg.sender)))))) {
-                revert NotAllowlisted();
-            }
-        }
+        if (!_isAllowlisted(msg.sender, proof)) revert NotAllowlisted();
+    }
+
+    /**
+     * @notice Non-reverting allowlist membership check for an arbitrary account.
+     * @dev Returns true when no allowlist is configured. Lets views (e.g. canOnboard)
+     *      evaluate allowlist eligibility without reverting, using the same leaf encoding
+     *      as `_checkAllowlist` so view and write paths agree.
+     * @param account Address to check membership for
+     * @param proof Merkle proof for `account`
+     */
+    function _isAllowlisted(address account, bytes32[] memory proof) internal view returns (bool) {
+        if (allowlistRoot == bytes32(0)) return true;
+        return MerkleProof.verify(proof, allowlistRoot, keccak256(bytes.concat(keccak256(abi.encode(account)))));
     }
 
     /**

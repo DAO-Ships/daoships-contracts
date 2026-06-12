@@ -112,6 +112,16 @@ async function asAvatar(avatarAddr: string) {
   return ethers.getImpersonatedSigner(avatarAddr);
 }
 
+/**
+ * Impersonate the DAOShip contract itself (address(this)) so we can call its
+ * `governanceOnly` setNavigators — the only way to register a navigator's
+ * permission bits outside of setUp. Used to grant a GOVERNOR (4) navigator.
+ */
+async function asDao(daoAddr: string) {
+  await ethers.provider.send("hardhat_setBalance", [daoAddr, "0x3635c9adc5dea00000"]);
+  return ethers.getImpersonatedSigner(daoAddr);
+}
+
 /** Create a default native budget owned by `manager`. Returns budgetId 0. */
 async function createNativeBudget(
   nav: any,
@@ -342,6 +352,35 @@ describe("BudgetNavigator", function () {
       expect(b.spentThisPeriod).to.equal(E(80));
       expect(b.totalSpent).to.equal(E(280));
     });
+
+    it("resets at the EXACT boundary (currentPeriodStart + periodLength), >= not >", async function () {
+      // _syncPeriod / remainingThisPeriod reset on `block.timestamp >= start + length`.
+      // Land exactly on that boundary and prove it resets (full allowance back),
+      // not on the tick before. PERIOD is the budget's periodLength.
+      const { nav, avatar, manager, r1 } = await deployBudget();
+      await createNativeBudget(nav, avatar, manager.address, { allowance: E(100), ceiling: E(10000) });
+
+      await nav.connect(manager).disburse(0, r1.address, E(100)); // exhaust period 0
+      const periodStart = (await nav.budgets(0)).currentPeriodStart;
+      const boundary = Number(periodStart) + PERIOD;
+
+      // One second BEFORE the boundary: still inside the period, nothing left.
+      await time.increaseTo(boundary - 1);
+      expect(await nav.remainingThisPeriod(0)).to.equal(0);
+
+      // EXACTLY at the boundary: >= triggers the reset → full allowance available.
+      await time.setNextBlockTimestamp(boundary);
+      // a view read at the boundary block also reports the reset
+      await ethers.provider.send("evm_mine", []);
+      expect(await nav.remainingThisPeriod(0)).to.equal(E(100));
+
+      // and a disburse at the boundary succeeds (lazily syncs spentThisPeriod to 0).
+      await nav.connect(manager).disburse(0, r1.address, E(100));
+      const b = await nav.budgets(0);
+      expect(b.spentThisPeriod).to.equal(E(100));
+      expect(b.totalSpent).to.equal(E(200));
+      expect(b.currentPeriodStart).to.equal(boundary); // advanced exactly one period
+    });
   });
 
   describe("disburseBatch — payroll", function () {
@@ -373,6 +412,58 @@ describe("BudgetNavigator", function () {
       await createNativeBudget(nav, avatar, manager.address, { allowance: E(100) });
       await expect(nav.connect(manager).disburseBatch(0, [r1.address, r2.address], [E(60), E(50)]))
         .to.be.revertedWithCustomError(nav, "AllowanceExceeded");
+    });
+
+    it("reverts CeilingExceeded when the batch sum exceeds the remaining lifetime ceiling", async function () {
+      // ceiling (E150) binds tighter than the per-period allowance (E200): the
+      // batch sum E170 is within allowance but over the lifetime cap → the BATCH
+      // path's CeilingExceeded branch (disburseBatch line ~333), distinct from the
+      // single-disburse CeilingExceeded already covered above.
+      const { nav, avatar, manager, r1, r2 } = await deployBudget();
+      await createNativeBudget(nav, avatar, manager.address, { allowance: E(200), ceiling: E(150) });
+      await expect(nav.connect(manager).disburseBatch(0, [r1.address, r2.address], [E(100), E(70)]))
+        .to.be.revertedWithCustomError(nav, "CeilingExceeded");
+      // counters untouched (revert before effects)
+      const b = await nav.budgets(0);
+      expect(b.totalSpent).to.equal(0);
+      expect(b.spentThisPeriod).to.equal(0);
+    });
+
+    it("emits exactly N Disbursed events and bumps totalSpent/spentThisPeriod by the batch sum", async function () {
+      const { nav, avatar, manager, r1, r2 } = await deployBudget();
+      await createNativeBudget(nav, avatar, manager.address, { allowance: E(100), ceiling: E(1000) });
+
+      const tx = await nav.connect(manager).disburseBatch(0, [r1.address, r2.address], [E(30), E(45)]);
+      const rc = await tx.wait();
+      const evs = rc!.logs.filter((l: any) => {
+        try { return nav.interface.parseLog(l)?.name === "Disbursed"; } catch { return false; }
+      });
+      expect(evs.length).to.equal(2); // exactly one per recipient
+
+      await expect(tx).to.emit(nav, "Disbursed").withArgs(0, r1.address, NATIVE, E(30));
+      await expect(tx).to.emit(nav, "Disbursed").withArgs(0, r2.address, NATIVE, E(45));
+
+      const b = await nav.budgets(0);
+      expect(b.totalSpent).to.equal(E(75)); // batch sum
+      expect(b.spentThisPeriod).to.equal(E(75));
+    });
+
+    it("CEI: a mid-batch transfer failure reverts the WHOLE batch; counters unchanged", async function () {
+      // daoShip has no receive()/fallback → a native send to it fails inside the
+      // vault. Placing it as the 2nd recipient proves the 1st (r1) transfer is also
+      // rolled back: no partial-spend, totalSpent/spentThisPeriod stay at 0.
+      const { nav, avatar, manager, r1, daoShip } = await deployBudget();
+      await createNativeBudget(nav, avatar, manager.address, { allowance: E(100), ceiling: E(1000) });
+      const r1Before = await ethers.provider.getBalance(r1.address);
+
+      await expect(
+        nav.connect(manager).disburseBatch(0, [r1.address, await daoShip.getAddress()], [E(20), E(10)])
+      ).to.be.revertedWithCustomError(nav, "TransferFailed");
+
+      expect(await ethers.provider.getBalance(r1.address)).to.equal(r1Before); // r1 NOT paid
+      const b = await nav.budgets(0);
+      expect(b.totalSpent).to.equal(0);
+      expect(b.spentThisPeriod).to.equal(0);
     });
 
     it("reverts NotAuthorized for non-manager", async function () {
@@ -437,6 +528,41 @@ describe("BudgetNavigator", function () {
       await nav.connect(manager).disburse(0, r1.address, E(1)); // resumed
       expect((await nav.budgets(0)).totalSpent).to.equal(E(1));
     });
+
+    it("a GOVERNOR (4) navigator (not the avatar) can pause and unpause", async function () {
+      // _isGovernorOrAvatar authorizes a navigator holding the GOVERNOR bit OR the
+      // avatar. The existing test only exercises the avatar arm; this hits the
+      // governor arm: register `bob` as a GOVERNOR navigator on the DAO (via
+      // setNavigators, callable only by the DAO contract itself), then pause/unpause
+      // FROM bob's address.
+      const { nav, daoShip, avatar, bob, manager, r1 } = await deployBudget();
+      await createNativeBudget(nav, avatar, manager.address);
+
+      // grant bob GOVERNOR (4) by impersonating the DAO (address(this)).
+      const dao = await asDao(await daoShip.getAddress());
+      await daoShip.connect(dao).setNavigators([bob.address], [4]);
+      expect(await daoShip.navigators(bob.address)).to.equal(4);
+
+      expect(await nav.paused()).to.equal(false);
+      await expect(nav.connect(bob).pause()).to.emit(nav, "Paused").withArgs(bob.address);
+      expect(await nav.paused()).to.equal(true);
+      // freeze is effective regardless of who tripped it
+      await expect(nav.connect(manager).disburse(0, r1.address, E(1))).to.be.revertedWithCustomError(nav, "IsPaused");
+
+      await expect(nav.connect(bob).unpause()).to.emit(nav, "Unpaused").withArgs(bob.address);
+      expect(await nav.paused()).to.equal(false);
+      await nav.connect(manager).disburse(0, r1.address, E(1)); // resumed
+      expect((await nav.budgets(0)).totalSpent).to.equal(E(1));
+    });
+
+    it("a navigator WITHOUT the GOVERNOR bit cannot pause", async function () {
+      // A registered navigator that only holds, say, MANAGER (2) must NOT pass the
+      // GOVERNOR-bit check — proves the branch tests the bit, not mere registration.
+      const { nav, daoShip, bob } = await deployBudget();
+      const dao = await asDao(await daoShip.getAddress());
+      await daoShip.connect(dao).setNavigators([bob.address], [2]); // MANAGER only
+      await expect(nav.connect(bob).pause()).to.be.revertedWithCustomError(nav, "NotAuthorized");
+    });
   });
 
   describe("View robustness", function () {
@@ -451,6 +577,17 @@ describe("BudgetNavigator", function () {
       const { nav, avatar, manager } = await deployBudget();
       const now = await time.latest();
       await createNativeBudget(nav, avatar, manager.address, { start: now + 10_000 });
+      expect(await nav.remainingThisPeriod(0)).to.equal(0);
+    });
+
+    it("remainingThisPeriod is 0 once the budget has ended (past endsAt)", async function () {
+      // hits the `!_isActive(b)` branch of remainingThisPeriod via the endsAt arm
+      // (the existing test only covers the not-yet-started arm).
+      const { nav, avatar, manager } = await deployBudget();
+      const now = await time.latest();
+      const end = now + 1000 + 10 * PERIOD;
+      await createNativeBudget(nav, avatar, manager.address, { start: now + 1000, end });
+      await time.increaseTo(end); // endsAt is exclusive: >= endsAt is inactive
       expect(await nav.remainingThisPeriod(0)).to.equal(0);
     });
   });

@@ -19,6 +19,9 @@ const MINUTE = 60;
 const HOUR = 60 * 60;
 const DAY = 24 * HOUR;
 const MIN_DELAY = 10 * MINUTE; // contract MIN_DELAY (sanity floor)
+const MAX_DELAY = 30 * DAY; // contract MAX_DELAY
+const MIN_EXPIRY = HOUR; // contract MIN_EXPIRY (1 hour)
+const MAX_EXPIRY = 3650 * DAY; // contract MAX_EXPIRY
 
 const coder = ethers.AbiCoder.defaultAbiCoder();
 
@@ -204,6 +207,31 @@ describe("TimelockNavigator", function () {
       await expect(TL.deploy(await daoShip.getAddress(), 2 * DAY, HOUR - 1, "", "")).to.be.revertedWithCustomError(TL, "InvalidConfig");
       await expect(TL.deploy(await daoShip.getAddress(), 2 * DAY, 3650 * DAY + 1, "", "")).to.be.revertedWithCustomError(TL, "InvalidConfig");
     });
+
+    it("accepts a delay exactly at MAX_DELAY (upper bound) and exposes the MAX_DELAY constant", async function () {
+      const { daoShip } = await deployTimelock();
+      const TL = await ethers.getContractFactory("TimelockNavigator");
+      expect(await (await TL.deploy(await daoShip.getAddress(), 2 * DAY, 7 * DAY, "", "")).MAX_DELAY()).to.equal(MAX_DELAY);
+      // delay == MAX_DELAY is accepted (the revert is `_delay > MAX_DELAY`, strict).
+      const nav = await TL.deploy(await daoShip.getAddress(), MAX_DELAY, 7 * DAY, "", "");
+      await nav.waitForDeployment();
+      expect(await nav.delay()).to.equal(MAX_DELAY);
+    });
+
+    it("accepts an expiryWindow exactly at MIN_EXPIRY and exactly at MAX_EXPIRY (both bounds inclusive)", async function () {
+      const { daoShip } = await deployTimelock();
+      const TL = await ethers.getContractFactory("TimelockNavigator");
+      // Bounds are inclusive: revert is `< MIN_EXPIRY || > MAX_EXPIRY`.
+      const navMin = await TL.deploy(await daoShip.getAddress(), 2 * DAY, MIN_EXPIRY, "", "");
+      await navMin.waitForDeployment();
+      expect(await navMin.expiryWindow()).to.equal(MIN_EXPIRY);
+      expect(await navMin.MIN_EXPIRY()).to.equal(MIN_EXPIRY);
+
+      const navMax = await TL.deploy(await daoShip.getAddress(), 2 * DAY, MAX_EXPIRY, "", "");
+      await navMax.waitForDeployment();
+      expect(await navMax.expiryWindow()).to.equal(MAX_EXPIRY);
+      expect(await navMax.MAX_EXPIRY()).to.equal(MAX_EXPIRY);
+    });
   });
 
   describe("queueChange", function () {
@@ -331,6 +359,30 @@ describe("TimelockNavigator", function () {
       expect((await nav.queuedChanges(0)).executed).to.equal(false);
     });
 
+    it("executes an already-queued change even while paused (pause only gates NEW queuing, not execution)", async function () {
+      // NatSpec: executeChange explicitly states "Paused state does NOT block execution"
+      // and the `paused` flag doc says it "does NOT block executing already-queued changes".
+      // So: queue → pause → advance past delay → executeChange must still succeed.
+      const { nav, avatar, daoShip } = await deployTimelock({ delay: 2 * DAY, expiryWindow: 7 * DAY });
+      const av = await asAvatar(await avatar.getAddress());
+      const cfg = encodeConfig({ votingPeriod: 5 * DAY });
+      await nav.connect(av).queueChange(cfg);
+
+      await nav.connect(av).pause();
+      expect(await nav.paused()).to.equal(true);
+
+      await time.increase(2 * DAY);
+      // Still within the expiry window, so it is executable despite the pause.
+      expect(await nav.isExecutable(0)).to.equal(true);
+      await expect(nav.executeChange(0, cfg))
+        .to.emit(nav, "ChangeExecuted")
+        .withArgs(0, (await ethers.getSigners())[0].address, ethers.keccak256(cfg));
+
+      expect(await daoShip.votingPeriod()).to.equal(5 * DAY);
+      expect((await nav.queuedChanges(0)).executed).to.equal(true);
+      expect(await nav.paused()).to.equal(true); // pause unchanged by execution
+    });
+
     it("reverts when the timelock lacks GOVERNOR permission", async function () {
       const { nav, avatar } = await deployTimelock({ grantGovernor: false });
       const av = await asAvatar(await avatar.getAddress());
@@ -405,6 +457,28 @@ describe("TimelockNavigator", function () {
       await time.increase(2 * DAY);
       await nav.executeChange(0, cfg);
       await expect(nav.connect(av).cancelChange(0)).to.be.revertedWithCustomError(nav, "ChangeAlreadyExecuted");
+    });
+
+    it("cancels an expired-but-unexecuted change (for bookkeeping) and emits ChangeCancelled", async function () {
+      // NatSpec: "An expired-but-unexecuted change may still be cancelled for
+      // bookkeeping (it could never execute anyway)." cancelChange has no expiry
+      // guard, so even past delay + expiryWindow the cancel must succeed.
+      const { nav, avatar } = await deployTimelock({ delay: 2 * DAY, expiryWindow: 7 * DAY });
+      const av = await asAvatar(await avatar.getAddress());
+      const cfg = encodeConfig({ votingPeriod: 5 * DAY });
+      await nav.connect(av).queueChange(cfg);
+
+      // advance PAST delay + expiry so the change is expired (un-executable)
+      await time.increase(2 * DAY + 7 * DAY + 1);
+      expect(await nav.isExecutable(0)).to.equal(false); // expired
+      await expect(nav.executeChange(0, cfg)).to.be.revertedWithCustomError(nav, "ChangeExpired");
+
+      // cancel still succeeds on the expired change
+      await expect(nav.connect(av).cancelChange(0))
+        .to.emit(nav, "ChangeCancelled").withArgs(0, await avatar.getAddress());
+      expect((await nav.queuedChanges(0)).cancelled).to.equal(true);
+      // now reverts ChangeAlreadyCancelled rather than ChangeExpired
+      await expect(nav.executeChange(0, cfg)).to.be.revertedWithCustomError(nav, "ChangeAlreadyCancelled");
     });
 
     it("reverts ChangeAlreadyCancelled on a double cancel", async function () {

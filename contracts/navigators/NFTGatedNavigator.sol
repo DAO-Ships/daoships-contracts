@@ -184,8 +184,33 @@ contract NFTGatedNavigator is BaseNavigator, IMembershipGate {
      * @notice Frontend convenience: can `candidate` onboard with `tokenId` right now?
      * @dev Combines eligibility, claim status, expiry and pause. Does NOT check tribute
      *      or mint caps (those depend on msg.value / running totals at call time).
+     *
+     *      ALLOWLIST: this no-proof overload cannot verify the optional Merkle allowlist,
+     *      so to avoid reporting a false `true` it returns `false` whenever an allowlist is
+     *      configured (`allowlistRoot != 0`). An allowlist-gated deployment must use the
+     *      proof overload {canOnboard(address,uint256,bytes32[])} for an accurate answer.
      */
     function canOnboard(address candidate, uint256 tokenId) external view returns (bool) {
+        if (allowlistRoot != bytes32(0)) return false;
+        return _canOnboard(candidate, tokenId);
+    }
+
+    /**
+     * @notice Frontend convenience with allowlist proof: can `candidate` onboard now?
+     * @dev Same checks as the no-proof overload PLUS the Merkle allowlist, evaluated for
+     *      `candidate` with the same leaf encoding the write path uses — so view and
+     *      `onboard` agree. Use this overload for allowlist-gated deployments.
+     * @param candidate Address that would call onboard
+     * @param tokenId Gate token to claim with
+     * @param proof Merkle proof for `candidate` (ignored if no allowlist is configured)
+     */
+    function canOnboard(address candidate, uint256 tokenId, bytes32[] calldata proof) external view returns (bool) {
+        if (!_isAllowlisted(candidate, proof)) return false;
+        return _canOnboard(candidate, tokenId);
+    }
+
+    /// @dev Shared eligibility check (pause, expiry, claimed, ownership) for the canOnboard views.
+    function _canOnboard(address candidate, uint256 tokenId) private view returns (bool) {
         if (paused) return false;
         if (expiry != 0 && block.timestamp > expiry) return false;
         if (claimed[tokenId]) return false;

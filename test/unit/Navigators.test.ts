@@ -1417,6 +1417,508 @@ describe("Navigator Contracts", function () {
       expect(await shares.balanceOf(alice.address)).to.equal(ethers.parseEther("5"));
     });
   });
+
+  // ==========================================================================
+  // Gap: OnboarderNavigator loot-minting arms (multiplier + fixed-price)
+  // ==========================================================================
+  describe("OnboarderNavigator (Loot Minting)", function () {
+    // Multiplier mode with a non-zero lootMultiplier:
+    //   shares = msg.value * shareMultiplier / 10000
+    //   loot   = msg.value * lootMultiplier  / 10000
+    async function deployLootMultiplierOnboarder() {
+      const [deployer, alice, bob] = await ethers.getSigners();
+
+      const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
+      const MockAvatar = await ethers.getContractFactory("MockAvatar");
+      const avatar = await MockAvatar.deploy();
+      await avatar.enableModule(await daoShip.getAddress());
+      const MultiSend = await ethers.getContractFactory("MultiSend");
+      const multisend = await MultiSend.deploy();
+
+      // Multiplier mode: 2x shares, 3x loot
+      const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator");
+      const onboarder = await OnboarderNavigator.deploy(
+        await daoShip.getAddress(),
+        20000,  // shareMultiplier (2x)
+        30000,  // lootMultiplier (3x)
+        0, 0, 0,                        // no fixed-price
+        ethers.parseEther("0.01"),      // minTribute
+        0, 0, 0, ethers.ZeroHash,     // no expiry, no caps, open
+        "Test Onboarder", "Test navigator"
+      );
+
+      const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint32", "uint32", "uint256", "uint256", "uint256", "uint256", "uint32"],
+        [7*24*60*60, 3*24*60*60, ethers.parseEther("0.1"), 2000, ethers.parseEther("1"), 6600, 0]
+      );
+
+      const initParams = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["address", "address", "address", "address", "bytes", "address[]", "uint256[]", "address[]", "uint256[]", "uint256[]", "address[]", "bool", "bool"],
+        [await loot.getAddress(), await shares.getAddress(), await avatar.getAddress(), await multisend.getAddress(), governanceConfig,
+         [await onboarder.getAddress()], [2],
+         [deployer.address], [ethers.parseEther("100")], [ethers.parseEther("0")], [], false, false]
+      );
+
+      await daoShip.setUp(initParams);
+      return { daoShip, shares, loot, avatar, onboarder, deployer, alice, bob };
+    }
+
+    it("Should mint shares AND loot in multiplier mode and forward tribute to vault", async function () {
+      const { onboarder, shares, loot, alice, daoShip } = await loadFixture(deployLootMultiplierOnboarder);
+
+      const tribute = ethers.parseEther("1.0");
+      const expectedShares = ethers.parseEther("2.0"); // 1.0 * 20000/10000
+      const expectedLoot = ethers.parseEther("3.0");   // 1.0 * 30000/10000
+
+      const tx = await onboarder.connect(alice)["onboard()"]({ value: tribute });
+
+      await expect(tx)
+        .to.emit(onboarder, "Onboard")
+        .withArgs(await daoShip.getAddress(), alice.address, tribute, expectedShares, expectedLoot);
+
+      expect(await shares.balanceOf(alice.address)).to.equal(expectedShares);
+      expect(await loot.balanceOf(alice.address)).to.equal(expectedLoot);
+
+      const avatarAddr = await daoShip.avatar();
+      expect(await ethers.provider.getBalance(avatarAddr)).to.equal(tribute);
+    });
+
+    // Fixed-price mode with both sharesPerUnit and lootPerUnit:
+    //   units = msg.value / pricePerUnit
+    //   shares = units * sharesPerUnit
+    //   loot   = units * lootPerUnit
+    async function deployLootFixedPriceOnboarder() {
+      const [deployer, alice, bob] = await ethers.getSigners();
+
+      const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
+      const MockAvatar = await ethers.getContractFactory("MockAvatar");
+      const avatar = await MockAvatar.deploy();
+      await avatar.enableModule(await daoShip.getAddress());
+      const MultiSend = await ethers.getContractFactory("MultiSend");
+      const multisend = await MultiSend.deploy();
+
+      // Fixed-price mode: 0.1 QUAI per unit; 1 share + 2 loot per unit
+      const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator");
+      const onboarder = await OnboarderNavigator.deploy(
+        await daoShip.getAddress(),
+        0, 0,                          // no multipliers
+        ethers.parseEther("0.1"),      // pricePerUnit
+        ethers.parseEther("1"),        // sharesPerUnit (1 share per unit)
+        ethers.parseEther("2"),        // lootPerUnit (2 loot per unit)
+        0,                             // no minTribute
+        0, 0, 0, ethers.ZeroHash,    // no expiry, no caps, open
+        "Test Onboarder", "Test navigator"
+      );
+
+      const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint32", "uint32", "uint256", "uint256", "uint256", "uint256", "uint32"],
+        [7*24*60*60, 3*24*60*60, ethers.parseEther("0.1"), 2000, ethers.parseEther("1"), 6600, 0]
+      );
+
+      const initParams = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["address", "address", "address", "address", "bytes", "address[]", "uint256[]", "address[]", "uint256[]", "uint256[]", "address[]", "bool", "bool"],
+        [await loot.getAddress(), await shares.getAddress(), await avatar.getAddress(), await multisend.getAddress(), governanceConfig,
+         [await onboarder.getAddress()], [2],
+         [deployer.address], [ethers.parseEther("100")], [ethers.parseEther("0")], [], false, false]
+      );
+
+      await daoShip.setUp(initParams);
+      return { daoShip, shares, loot, avatar, onboarder, deployer, alice, bob };
+    }
+
+    it("Should mint shares AND loot in fixed-price mode and forward tribute to vault", async function () {
+      const { onboarder, shares, loot, alice, daoShip } = await loadFixture(deployLootFixedPriceOnboarder);
+
+      // 0.3 QUAI -> 3 units -> 3 shares, 6 loot. No remainder.
+      const payment = ethers.parseEther("0.3");
+      const expectedShares = ethers.parseEther("3"); // 3 units * 1
+      const expectedLoot = ethers.parseEther("6");   // 3 units * 2
+      const expectedCost = ethers.parseEther("0.3");
+
+      const tx = await onboarder.connect(alice)["onboard()"]({ value: payment });
+
+      await expect(tx)
+        .to.emit(onboarder, "Onboard")
+        .withArgs(await daoShip.getAddress(), alice.address, expectedCost, expectedShares, expectedLoot);
+
+      expect(await shares.balanceOf(alice.address)).to.equal(expectedShares);
+      expect(await loot.balanceOf(alice.address)).to.equal(expectedLoot);
+
+      const avatarAddr = await daoShip.avatar();
+      expect(await ethers.provider.getBalance(avatarAddr)).to.equal(expectedCost);
+    });
+  });
+
+  // ==========================================================================
+  // Gap: OnboarderNavigator expiry boundary (check is block.timestamp > expiry)
+  // ==========================================================================
+  describe("OnboarderNavigator (Expiry Boundary)", function () {
+    async function deployExpiringOnboarder(expiryTime: number) {
+      const [deployer, alice, bob] = await ethers.getSigners();
+
+      const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
+      const MockAvatar = await ethers.getContractFactory("MockAvatar");
+      const avatar = await MockAvatar.deploy();
+      await avatar.enableModule(await daoShip.getAddress());
+      const MultiSend = await ethers.getContractFactory("MultiSend");
+      const multisend = await MultiSend.deploy();
+
+      const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator");
+      const onboarder = await OnboarderNavigator.deploy(
+        await daoShip.getAddress(),
+        10000, 0, 0, 0, 0,            // 1x shares, multiplier mode
+        ethers.parseEther("0.01"),     // minTribute
+        expiryTime, 0, 0, ethers.ZeroHash,
+        "Test Onboarder", "Test navigator"
+      );
+
+      const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint32", "uint32", "uint256", "uint256", "uint256", "uint256", "uint32"],
+        [7*24*60*60, 3*24*60*60, ethers.parseEther("0.1"), 2000, ethers.parseEther("1"), 6600, 0]
+      );
+
+      const initParams = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["address", "address", "address", "address", "bytes", "address[]", "uint256[]", "address[]", "uint256[]", "uint256[]", "address[]", "bool", "bool"],
+        [await loot.getAddress(), await shares.getAddress(), await avatar.getAddress(), await multisend.getAddress(), governanceConfig,
+         [await onboarder.getAddress()], [2],
+         [deployer.address], [ethers.parseEther("100")], [ethers.parseEther("0")], [], false, false]
+      );
+
+      await daoShip.setUp(initParams);
+      return { daoShip, shares, onboarder, deployer, alice, bob };
+    }
+
+    it("Should allow onboarding at block.timestamp == expiry (boundary, not yet expired)", async function () {
+      const expiryTime = (await time.latest()) + 7 * 24 * 60 * 60;
+      const { onboarder, shares, alice } = await deployExpiringOnboarder(expiryTime);
+
+      // Land the next block exactly on the expiry timestamp: block.timestamp == expiry
+      // The guard is `block.timestamp > expiry`, so this should NOT revert.
+      await time.setNextBlockTimestamp(expiryTime);
+      await onboarder.connect(alice)["onboard()"]({ value: ethers.parseEther("1") });
+
+      expect(await shares.balanceOf(alice.address)).to.equal(ethers.parseEther("1"));
+    });
+
+    it("Should revert Expired at block.timestamp == expiry + 1", async function () {
+      const expiryTime = (await time.latest()) + 7 * 24 * 60 * 60;
+      const { onboarder, alice } = await deployExpiringOnboarder(expiryTime);
+
+      // Land the next block one second past expiry: block.timestamp == expiry + 1
+      await time.setNextBlockTimestamp(expiryTime + 1);
+      await expect(
+        onboarder.connect(alice)["onboard()"]({ value: ethers.parseEther("1") })
+      ).to.be.revertedWithCustomError(onboarder, "Expired");
+    });
+  });
+
+  // ==========================================================================
+  // Gap: ERC20TributeNavigator Merkle allowlist (NotAllowlisted path)
+  // ==========================================================================
+  describe("ERC20TributeNavigator Merkle Allowlist", function () {
+    // Same OZ StandardMerkleTree-compatible 2-leaf tree builder used by the
+    // OnboarderNavigator allowlist tests above.
+    function buildMerkleTree(addresses: string[]) {
+      const leaves = addresses.map(addr =>
+        ethers.keccak256(ethers.concat([
+          ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(["address"], [addr]))
+        ]))
+      );
+
+      const sorted = [...leaves].sort((a, b) => {
+        const aBn = BigInt(a);
+        const bBn = BigInt(b);
+        return aBn < bBn ? -1 : aBn > bBn ? 1 : 0;
+      });
+
+      const root = ethers.keccak256(
+        ethers.solidityPacked(["bytes32", "bytes32"], [sorted[0], sorted[1]])
+      );
+
+      const proofs: { [addr: string]: string[] } = {};
+      for (let i = 0; i < addresses.length; i++) {
+        const otherLeaf = leaves[1 - i]; // only works for 2-leaf tree
+        proofs[addresses[i]] = [otherLeaf];
+      }
+
+      return { root, leaves, proofs };
+    }
+
+    async function deployERC20MerkleAllowlistFixture() {
+      const [deployer, alice, bob, carol] = await ethers.getSigners();
+
+      const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
+      const MockAvatar = await ethers.getContractFactory("MockAvatar");
+      const avatar = await MockAvatar.deploy();
+      await avatar.enableModule(await daoShip.getAddress());
+      const MultiSend = await ethers.getContractFactory("MultiSend");
+      const multisend = await MultiSend.deploy();
+
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const tributeToken = await MockERC20.deploy("Mock USDC", "USDC");
+      await tributeToken.mint(alice.address, ethers.parseEther("10000"));
+      await tributeToken.mint(bob.address, ethers.parseEther("10000"));
+      await tributeToken.mint(carol.address, ethers.parseEther("10000"));
+
+      // Allowlist alice and bob
+      const { root, proofs } = buildMerkleTree([alice.address, bob.address]);
+
+      const ERC20TributeNavigator = await ethers.getContractFactory("ERC20TributeNavigator");
+      const tributeNavigator = await ERC20TributeNavigator.deploy(
+        await daoShip.getAddress(),
+        await tributeToken.getAddress(),
+        ethers.parseEther("100"),  // pricePerShare
+        0,                         // pricePerLoot
+        0,                         // no expiry
+        0,                         // no mint cap
+        0,                         // perAddressCap (unlimited)
+        root,                      // allowlistRoot
+        "Test ERC20 Tribute", "Test navigator"
+      );
+
+      const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint32", "uint32", "uint256", "uint256", "uint256", "uint256", "uint32"],
+        [7*24*60*60, 3*24*60*60, ethers.parseEther("0.1"), 2000, ethers.parseEther("1"), 6600, 0]
+      );
+
+      const initParams = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["address", "address", "address", "address", "bytes", "address[]", "uint256[]", "address[]", "uint256[]", "uint256[]", "address[]", "bool", "bool"],
+        [await loot.getAddress(), await shares.getAddress(), await avatar.getAddress(), await multisend.getAddress(), governanceConfig,
+         [await tributeNavigator.getAddress()], [2],
+         [deployer.address], [ethers.parseEther("100")], [ethers.parseEther("0")], [], false, false]
+      );
+
+      await daoShip.setUp(initParams);
+      return { daoShip, shares, loot, avatar, tributeToken, tributeNavigator, deployer, alice, bob, carol, proofs, root };
+    }
+
+    it("alice onboards with valid proof — succeeds", async function () {
+      const { shares, tributeToken, tributeNavigator, alice, proofs, daoShip } =
+        await loadFixture(deployERC20MerkleAllowlistFixture);
+
+      // 1 share -> tribute = (1e18 * 100e18) / 1e18 = 100e18
+      await tributeToken.connect(alice).approve(await tributeNavigator.getAddress(), ethers.parseEther("100"));
+
+      await tributeNavigator.connect(alice)["onboard(uint256,uint256,bytes32[])"](
+        ethers.parseEther("1"), 0, proofs[alice.address]
+      );
+
+      expect(await shares.balanceOf(alice.address)).to.equal(ethers.parseEther("1"));
+      expect(await tributeToken.balanceOf(await daoShip.avatar())).to.equal(ethers.parseEther("100"));
+    });
+
+    it("carol onboards with invalid proof — reverts NotAllowlisted", async function () {
+      const { tributeToken, tributeNavigator, carol } =
+        await loadFixture(deployERC20MerkleAllowlistFixture);
+
+      await tributeToken.connect(carol).approve(await tributeNavigator.getAddress(), ethers.parseEther("100"));
+
+      // Carol is not in the allowlist — bogus proof
+      await expect(
+        tributeNavigator.connect(carol)["onboard(uint256,uint256,bytes32[])"](
+          ethers.parseEther("1"), 0, [ethers.keccak256(ethers.toUtf8Bytes("bogus"))]
+        )
+      ).to.be.revertedWithCustomError(tributeNavigator, "NotAllowlisted");
+    });
+
+    it("bob onboards without proof (empty array) — reverts NotAllowlisted", async function () {
+      const { tributeToken, tributeNavigator, bob } =
+        await loadFixture(deployERC20MerkleAllowlistFixture);
+
+      await tributeToken.connect(bob).approve(await tributeNavigator.getAddress(), ethers.parseEther("100"));
+
+      // Bob is in the allowlist but provides no proof
+      await expect(
+        tributeNavigator.connect(bob)["onboard(uint256,uint256,bytes32[])"](
+          ethers.parseEther("1"), 0, []
+        )
+      ).to.be.revertedWithCustomError(tributeNavigator, "NotAllowlisted");
+    });
+  });
+
+  // ==========================================================================
+  // Gap: ERC20TributeNavigator _calculateTribute config-mismatch (InvalidConfig)
+  // ==========================================================================
+  describe("ERC20TributeNavigator (_calculateTribute config mismatch)", function () {
+    // Shares-only navigator (pricePerLoot == 0): requesting loot reverts InvalidConfig.
+    async function deploySharesOnly() {
+      const [deployer, alice] = await ethers.getSigners();
+
+      const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
+      const MockAvatar = await ethers.getContractFactory("MockAvatar");
+      const avatar = await MockAvatar.deploy();
+      await avatar.enableModule(await daoShip.getAddress());
+      const MultiSend = await ethers.getContractFactory("MultiSend");
+      const multisend = await MultiSend.deploy();
+
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const tributeToken = await MockERC20.deploy("Mock USDC", "USDC");
+      await tributeToken.mint(alice.address, ethers.parseEther("10000"));
+
+      const ERC20TributeNavigator = await ethers.getContractFactory("ERC20TributeNavigator");
+      const tributeNavigator = await ERC20TributeNavigator.deploy(
+        await daoShip.getAddress(),
+        await tributeToken.getAddress(),
+        ethers.parseEther("100"),  // pricePerShare
+        0,                         // pricePerLoot == 0 (loot not offered)
+        0, 0, 0, ethers.ZeroHash,
+        "Test ERC20 Tribute", "Test navigator"
+      );
+
+      const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint32", "uint32", "uint256", "uint256", "uint256", "uint256", "uint32"],
+        [7*24*60*60, 3*24*60*60, ethers.parseEther("0.1"), 2000, ethers.parseEther("1"), 6600, 0]
+      );
+      const initParams = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["address", "address", "address", "address", "bytes", "address[]", "uint256[]", "address[]", "uint256[]", "uint256[]", "address[]", "bool", "bool"],
+        [await loot.getAddress(), await shares.getAddress(), await avatar.getAddress(), await multisend.getAddress(), governanceConfig,
+         [await tributeNavigator.getAddress()], [2],
+         [deployer.address], [ethers.parseEther("100")], [ethers.parseEther("0")], [], false, false]
+      );
+      await daoShip.setUp(initParams);
+      return { daoShip, tributeToken, tributeNavigator, deployer, alice };
+    }
+
+    // Loot-only navigator (pricePerShare == 0): requesting shares reverts InvalidConfig.
+    async function deployLootOnly() {
+      const [deployer, alice] = await ethers.getSigners();
+
+      const daoShip = await deployDAOShipClone(deployer);
+      const { shares, loot } = await deployTokenClones(deployer, await daoShip.getAddress());
+      const MockAvatar = await ethers.getContractFactory("MockAvatar");
+      const avatar = await MockAvatar.deploy();
+      await avatar.enableModule(await daoShip.getAddress());
+      const MultiSend = await ethers.getContractFactory("MultiSend");
+      const multisend = await MultiSend.deploy();
+
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const tributeToken = await MockERC20.deploy("Mock USDC", "USDC");
+      await tributeToken.mint(alice.address, ethers.parseEther("10000"));
+
+      const ERC20TributeNavigator = await ethers.getContractFactory("ERC20TributeNavigator");
+      const tributeNavigator = await ERC20TributeNavigator.deploy(
+        await daoShip.getAddress(),
+        await tributeToken.getAddress(),
+        0,                         // pricePerShare == 0 (shares not offered)
+        ethers.parseEther("50"),   // pricePerLoot
+        0, 0, 0, ethers.ZeroHash,
+        "Test ERC20 Tribute", "Test navigator"
+      );
+
+      const governanceConfig = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["uint32", "uint32", "uint256", "uint256", "uint256", "uint256", "uint32"],
+        [7*24*60*60, 3*24*60*60, ethers.parseEther("0.1"), 2000, ethers.parseEther("1"), 6600, 0]
+      );
+      const initParams = ethers.AbiCoder.defaultAbiCoder().encode(
+        ["address", "address", "address", "address", "bytes", "address[]", "uint256[]", "address[]", "uint256[]", "uint256[]", "address[]", "bool", "bool"],
+        [await loot.getAddress(), await shares.getAddress(), await avatar.getAddress(), await multisend.getAddress(), governanceConfig,
+         [await tributeNavigator.getAddress()], [2],
+         [deployer.address], [ethers.parseEther("100")], [ethers.parseEther("0")], [], false, false]
+      );
+      await daoShip.setUp(initParams);
+      return { daoShip, tributeToken, tributeNavigator, deployer, alice };
+    }
+
+    it("Shares-only navigator: requesting lootToMint > 0 reverts InvalidConfig", async function () {
+      const { tributeNavigator, tributeToken, alice } = await deploySharesOnly();
+
+      await tributeToken.connect(alice).approve(await tributeNavigator.getAddress(), ethers.parseEther("10000"));
+
+      // lootToMint > 0 but pricePerLoot == 0 -> InvalidConfig
+      await expect(
+        tributeNavigator.connect(alice)["onboard(uint256,uint256)"](0, ethers.parseEther("1"))
+      ).to.be.revertedWithCustomError(tributeNavigator, "InvalidConfig");
+    });
+
+    it("Loot-only navigator: requesting sharesToMint > 0 reverts InvalidConfig", async function () {
+      const { tributeNavigator, tributeToken, alice } = await deployLootOnly();
+
+      await tributeToken.connect(alice).approve(await tributeNavigator.getAddress(), ethers.parseEther("10000"));
+
+      // sharesToMint > 0 but pricePerShare == 0 -> InvalidConfig
+      await expect(
+        tributeNavigator.connect(alice)["onboard(uint256,uint256)"](ethers.parseEther("1"), 0)
+      ).to.be.revertedWithCustomError(tributeNavigator, "InvalidConfig");
+    });
+  });
+
+  // ==========================================================================
+  // Gap: ERC20TributeNavigator constructor InvalidConfig reverts
+  // ==========================================================================
+  describe("ERC20TributeNavigator (Constructor InvalidConfig)", function () {
+    it("Should revert when tributeToken == address(0)", async function () {
+      const [deployer] = await ethers.getSigners();
+      const daoShip = await deployDAOShipClone(deployer);
+
+      const ERC20TributeNavigator = await ethers.getContractFactory("ERC20TributeNavigator");
+      await expect(
+        ERC20TributeNavigator.deploy(
+          await daoShip.getAddress(),
+          ethers.ZeroAddress,        // tributeToken == 0 -> InvalidConfig
+          ethers.parseEther("100"), 0, 0, 0, 0, ethers.ZeroHash,
+          "Test ERC20 Tribute", "Test navigator"
+        )
+      ).to.be.revertedWithCustomError(ERC20TributeNavigator, "InvalidConfig");
+    });
+
+    it("Should revert when both pricePerShare == 0 AND pricePerLoot == 0", async function () {
+      const [deployer] = await ethers.getSigners();
+      const daoShip = await deployDAOShipClone(deployer);
+
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const token = await MockERC20.deploy("Test", "TT");
+
+      const ERC20TributeNavigator = await ethers.getContractFactory("ERC20TributeNavigator");
+      await expect(
+        ERC20TributeNavigator.deploy(
+          await daoShip.getAddress(),
+          await token.getAddress(),
+          0, 0,                      // both prices zero -> InvalidConfig
+          0, 0, 0, ethers.ZeroHash,
+          "Test ERC20 Tribute", "Test navigator"
+        )
+      ).to.be.revertedWithCustomError(ERC20TributeNavigator, "InvalidConfig");
+    });
+  });
+
+  // ==========================================================================
+  // Gap: BaseNavigator zero-daoShip InvalidConfig (inherited constructor guard)
+  // ==========================================================================
+  describe("BaseNavigator (zero daoShip guard)", function () {
+    it("OnboarderNavigator reverts InvalidConfig when daoShip == address(0)", async function () {
+      const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator");
+      await expect(
+        OnboarderNavigator.deploy(
+          ethers.ZeroAddress,        // daoShip == 0 -> BaseNavigator InvalidConfig
+          20000, 0, 0, 0, 0,
+          ethers.parseEther("0.01"),
+          0, 0, 0, ethers.ZeroHash,
+          "Test Onboarder", "Test navigator"
+        )
+      ).to.be.revertedWithCustomError(OnboarderNavigator, "InvalidConfig");
+    });
+
+    it("ERC20TributeNavigator reverts InvalidConfig when daoShip == address(0)", async function () {
+      const [deployer] = await ethers.getSigners();
+      const MockERC20 = await ethers.getContractFactory("MockERC20");
+      const token = await MockERC20.deploy("Test", "TT");
+
+      const ERC20TributeNavigator = await ethers.getContractFactory("ERC20TributeNavigator");
+      await expect(
+        ERC20TributeNavigator.deploy(
+          ethers.ZeroAddress,        // daoShip == 0 -> BaseNavigator InvalidConfig
+          await token.getAddress(),
+          ethers.parseEther("100"), 0, 0, 0, 0, ethers.ZeroHash,
+          "Test ERC20 Tribute", "Test navigator"
+        )
+      ).to.be.revertedWithCustomError(ERC20TributeNavigator, "InvalidConfig");
+    });
+  });
 });
 
 describe("Permission-bit ABI stability", function () {

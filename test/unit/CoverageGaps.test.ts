@@ -4132,12 +4132,11 @@ describe("CoverageGaps", function () {
   // V8: OnboarderNavigator receive() nonReentrant — reentrancy blocked
   // ==========================================================================
   describe("V8: receive() nonReentrant on OnboarderNavigator", function () {
-    it("receive() reverts when reentrancy lock is already held (called during onboard refund)", async function () {
-      // Deploy a fixed-price OnboarderNavigator (has refund path) with the full DAO
+    async function deployFixedPriceOnboarder() {
       const { daoShip, deployer } = await loadFixture(deployDAOShipFixture);
       const daoShipAddr = await daoShip.getAddress();
 
-      // Deploy fixed-price navigator: 1 ETH per unit, 1e18 shares per unit, open
+      // Fixed-price navigator: 1 ETH per unit, 1e18 shares per unit, open (has a refund path)
       const OnboarderNavigator = await ethers.getContractFactory("OnboarderNavigator");
       const navigator = await OnboarderNavigator.deploy(
         daoShipAddr,
@@ -4158,20 +4157,34 @@ describe("CoverageGaps", function () {
       const proposalData = buildExecuteAsGovernanceProposal(daoShip, daoShipAddr, setNavCalldata);
       await passProposal(daoShip, deployer, proposalData);
 
-      // The navigator is now registered. Send 1.5 ETH — 1 unit costs 1 ETH, 0.5 ETH refund.
-      // In the old code, the refund's callback could reenter receive() → _onboard().
-      // With nonReentrant on receive(), the refund to a contract that sends ETH back
-      // would revert because the outer onboard() holds the reentrancy lock.
+      const sharesContract = await ethers.getContractAt("SharesERC20", await daoShip.sharesToken());
+      return { daoShip, navigator, sharesContract };
+    }
 
-      // For this test, we verify the normal path works (no reentrancy):
-      // Simple EOA call — should succeed normally
+    it("blocks reentry during the onboard refund (attacker re-entering receive() reverts the whole tx)", async function () {
+      const { navigator, sharesContract } = await deployFixedPriceOnboarder();
+
+      // Attacker overpays (1.5 ETH → 0.5 ETH refund); on receiving the refund it re-enters
+      // the navigator's nonReentrant receive(). The guard must block it, failing the refund
+      // and reverting the whole onboard — so the attacker mints nothing.
+      const Attacker = await ethers.getContractFactory("MockReentrantOnboardAttacker");
+      const attacker = await Attacker.deploy(await navigator.getAddress());
+
+      // The blocked reentry makes the attacker's receive() revert, so the navigator's
+      // refund transfer fails → RefundFailed. Asserting that specific error proves the
+      // guard fired (not an incidental setup revert).
+      await expect(attacker.attack({ value: ethers.parseEther("1.5") }))
+        .to.be.revertedWithCustomError(navigator, "RefundFailed");
+      // State rolled back: the attacker received no shares (had the guard been absent, the
+      // re-entrant onboard would have succeeded and this would be non-zero).
+      expect(await sharesContract.balanceOf(await attacker.getAddress())).to.equal(0n);
+    });
+
+    it("the guard is not sticky: a normal EOA onboard with refund still succeeds", async function () {
+      const { navigator, sharesContract } = await deployFixedPriceOnboarder();
+      // 1.5 ETH → 1 unit (1e18 shares), 0.5 ETH refunded to the EOA.
       const [, , , carol] = await ethers.getSigners();
       await navigator.connect(carol)["onboard()"]({ value: ethers.parseEther("1.5") });
-
-      // Verify carol got shares and 0.5 ETH was refunded
-      // Carol should have 1e18 shares (1 unit * 1e18 sharesPerUnit)
-      const shares = await daoShip.sharesToken();
-      const sharesContract = await ethers.getContractAt("SharesERC20", shares);
       expect(await sharesContract.balanceOf(carol.address)).to.equal(ethers.parseEther("1"));
     });
   });

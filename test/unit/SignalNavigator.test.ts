@@ -267,6 +267,73 @@ describe("SignalNavigator", function () {
     });
   });
 
+  describe("startTime boundaries (createPoll: startTime > block.timestamp + maxStartDelay reverts)", function () {
+    // The contract gate is: `startTime < block.timestamp || startTime > block.timestamp + maxStartDelay`.
+    // Both comparisons are evaluated against block.timestamp AT THE MINING BLOCK of the createPoll tx.
+    // We pin that block's timestamp with setNextBlockTimestamp so the boundary lands exactly: the value
+    // we pass as `mineAt` IS the block.timestamp inside createPoll.
+
+    it("accepts startTime == now (lower boundary): poll opens immediately and is Active", async function () {
+      const { nav, alice } = await deploySignal({ maxStartDelay: 7 * DAY });
+      const mineAt = (await time.latest()) + 1000;
+      await time.setNextBlockTimestamp(mineAt);
+      // startTime == block.timestamp → passes `startTime < block.timestamp` (false) → accepted,
+      // votingStarts == now, snapshot == now - 1, so the poll is Active in the same block.
+      await nav.connect(alice).createPoll("q", 2, mineAt, DAY);
+
+      const p = await nav.polls(0);
+      expect(p.votingStarts).to.equal(mineAt);
+      expect(p.snapshotTimestamp).to.equal(mineAt - 1);
+      expect(await nav.pollStatus(0)).to.equal(Status.Active);
+    });
+
+    it("accepts startTime == now + maxStartDelay (maximum allowed lead): poll is Pending", async function () {
+      const maxStartDelay = 7 * DAY;
+      const { nav, alice } = await deploySignal({ maxStartDelay });
+      const mineAt = (await time.latest()) + 1000;
+      await time.setNextBlockTimestamp(mineAt);
+      // startTime == block.timestamp + maxStartDelay → `startTime > block.timestamp + maxStartDelay` is
+      // false (strict >), so the maximum lead is inclusive and accepted.
+      await nav.connect(alice).createPoll("q", 2, mineAt + maxStartDelay, DAY);
+
+      const p = await nav.polls(0);
+      expect(p.votingStarts).to.equal(mineAt + maxStartDelay);
+      expect(p.snapshotTimestamp).to.equal(mineAt + maxStartDelay - 1);
+      expect(await nav.pollStatus(0)).to.equal(Status.Pending);
+    });
+
+    it("reverts InvalidStartTime at startTime == now + maxStartDelay + 1 (one second over the max lead)", async function () {
+      const maxStartDelay = 7 * DAY;
+      const { nav, alice } = await deploySignal({ maxStartDelay });
+      const mineAt = (await time.latest()) + 1000;
+      await time.setNextBlockTimestamp(mineAt);
+      // startTime == block.timestamp + maxStartDelay + 1 → trips the strict `>` comparison.
+      await expect(
+        nav.connect(alice).createPoll("q", 2, mineAt + maxStartDelay + 1, DAY)
+      ).to.be.revertedWithCustomError(nav, "InvalidStartTime");
+    });
+
+    it("reverts InvalidStartTime for any future startTime when maxStartDelay == 0 (now+1 over the zero lead)", async function () {
+      const { nav, alice } = await deploySignal({ maxStartDelay: 0 });
+      const mineAt = (await time.latest()) + 1000;
+      await time.setNextBlockTimestamp(mineAt);
+      // With maxStartDelay 0 the accepted window collapses to exactly block.timestamp; startTime == now+1
+      // is the smallest future value and exceeds `block.timestamp + 0`.
+      await expect(
+        nav.connect(alice).createPoll("q", 2, mineAt + 1, DAY)
+      ).to.be.revertedWithCustomError(nav, "InvalidStartTime");
+    });
+
+    it("accepts startTime == now when maxStartDelay == 0 (the only non-zero startTime allowed)", async function () {
+      const { nav, alice } = await deploySignal({ maxStartDelay: 0 });
+      const mineAt = (await time.latest()) + 1000;
+      await time.setNextBlockTimestamp(mineAt);
+      // Explicit startTime == block.timestamp still passes even with zero lead (window is [now, now]).
+      await nav.connect(alice).createPoll("q", 2, mineAt, DAY);
+      expect(await nav.pollStatus(0)).to.equal(Status.Active);
+    });
+  });
+
   describe("Voting", function () {
     it("tallies share-weighted votes across options", async function () {
       const { nav, alice, bob, carol } = await deploySignal();

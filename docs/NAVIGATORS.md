@@ -661,68 +661,46 @@ function previewAdjustment() external view returns (
 
 ---
 
-#### SubscriptionNavigator (MANAGER)
+#### SubscriptionNavigator (MANAGER) — **SHIPPED**
 
-**What it does:** Recurring membership fees. Members pay periodic tribute to maintain shares. Missed payments result in proportional share burning. Anyone can call `collectFee` to process overdue accounts.
+> **Canonical reference:** [`docs/SUBSCRIPTION_NAVIGATOR.md`](SUBSCRIPTION_NAVIGATOR.md) — full ABI, gotchas, and audit sign-off.
 
-**Why DAO Ships needs this:** `burnShares` exists but has no recurring payment logic, no deadline tracking, no automatic enforcement. A governance proposal per delinquent member per period is operationally untenable.
+**What it does:** Recurring membership dues. Members **pull-pay** periodic fees in any of a
+governance-set menu of accepted tokens (native QUAI or ERC20) straight to the vault treasury. Past a
+grace window, **anyone** may `collectFee(member)` to strip a lapsed member's shares for a small loot
+keeper reward.
 
-**Why it matters at 1000+ members:** Investment DAOs charging management fees (1-2% annual) need automated enforcement. At 1000 members, manually tracking 1000 subscription payments per period is impossible. Without it, free-riders hold shares indefinitely.
+**Why DAO Ships needs this:** `burnShares`/`convertSharesToLoot` exist but have no recurring-payment
+logic, deadline tracking, or automatic enforcement. A governance proposal per delinquent member per
+period is operationally untenable; at 1000 members, manual dues tracking is impossible and free-riders
+would hold voting shares indefinitely.
 
-**Permission:** MANAGER (2). Burns shares/loot for non-payment.
+**Permission:** **MANAGER (2)** — calls `burnShares` / `convertSharesToLoot` (enforcement) and
+`mintLoot` (keeper reward). NOT a vault module: `payFee` only moves member funds *into* the vault.
+Registered the standard way via `setNavigators([nav], [2])`.
 
-**Architecture:** Pull payment model -- members call `payFee()` explicitly each period (no infinite approvals). Tracks `paidThrough` timestamp per member. Pre-payment supported. Grace period follows each deadline. After grace, anyone can call `collectFee(member)` to burn delinquent member's shares. Small collector reward (loot) incentivizes keepers.
+**Two design decisions that diverged from the original sketch** (both settled in design review):
 
-**State variables:**
+- **Enforcement is a constructor flag** (`burnOnCollect`), resolving the original section's
+  "proportional" vs "burn ALL" contradiction. Default `false` → **convert delinquent shares to loot**
+  (non-destructive: member keeps economic value, loses the vote); `true` → **burn** them. Either way
+  `collectFee` removes the member's *entire* current share balance, not a per-period slice.
+- **Universal coverage via enrollment, not opt-in.** Dues apply to everyone the DAO enrolls (first
+  `payFee`, governance `enroll`/`enrollBatch`, or `_initialMembers`); governance can compel enrollment,
+  so refusing to pay is not a loophole. Enrollment grants one complimentary period (no retroactive
+  mass-eject when bolted onto an existing DAO). Catch-up is a **debt model**; collection un-enrolls.
 
-```solidity
-DAOShip public immutable daoShip;
-IERC20 public immutable feeToken;
-uint256 public immutable feePerPeriod;
-uint256 public immutable periodDuration;
-uint256 public immutable graceDuration;
-uint256 public immutable startTime;
-mapping(address => uint256) public paidThrough;
-uint256 public immutable collectorRewardBps;    // e.g., 100 = 1%
-bool public paused;
-```
+**Multi-token & oracle-free:** accepted `tokens[]`/`feesPerPeriod[]` set at construction
+(`address(0)` = native QUAI); member chooses the token at `payFee(periods, token)`; fixed per-token
+price, no oracle. The menu is **immutable** — redeploy to change it.
 
-**Key functions:**
+**Known edge:** `collectFee` can be un-callable if removing a large member's shares would breach
+`sponsorThreshold` (the core revert bubbles up) — intentional, so an automated collection can't
+deadlock governance.
 
-```solidity
-function payFee(uint256 periods) external;
-function payFeeFor(address member, uint256 periods) external;
-function collectFee(address member) external;
-
-function isCurrent(address member) external view returns (bool);
-function nextDeadline(address member) external view returns (uint256);
-function inGracePeriod(address member) external view returns (bool);
-function isDelinquent(address member) external view returns (bool);
-```
-
-- `payFee` -- transfers `feePerPeriod * periods` of `feeToken` to vault via SafeERC20. Advances `paidThrough`. Fee-on-transfer detection.
-- `collectFee` -- checks `isDelinquent` (past grace period). Burns ALL shares. Mints `collectorRewardBps` of burned shares as loot to caller.
-
-**Events:** `FeePaid`, `FeeCollected`, `Paused`, `Unpaused`.
-
-**Custom errors:** `InvalidConfig`, `NotAuthorized`, `IsPaused`, `ZeroPeriods`, `NotDelinquent`, `NoSharesToBurn`, `TransferFailed`, `InsufficientPayment`.
-
-**Test scenarios:**
-
-1. Happy path: pay fee, verify paidThrough advances and token transferred to vault
-2. Pre-pay 3 periods
-3. Pay for another member
-4. Grace period: missed deadline, isCurrent=false, inGracePeriod=true, isDelinquent=false
-5. Collect: past grace, shares burned, reward minted to collector
-6. Revert: not delinquent -> `NotDelinquent`
-7. Revert: 0 shares -> `NoSharesToBurn`
-8. Collector reward math: 1000 shares at 100bps -> 10 loot
-9. Zero collector reward: no loot minted
-10. Late catch-up: miss 2 periods, pay 3, verify current
-11. Fee-on-transfer: insufficient received reverts
-12. Fuzz: `paidThrough` never decreases; shares only burned when `isDelinquent`
-
-**Estimated size:** ~190 lines of Solidity.
+**Shipped surface:** `payFee`/`payFeeFor`/`collectFee`/`enroll`/`enrollBatch`/`withdrawStuckTokens`/
+`pause`/`unpause`; events `MemberEnrolled`, `FeePaid` (one per payment), `FeeCollected` (one per
+collection), `Paused`, `Unpaused`. ~340 lines. See the canonical doc for the full spec.
 
 ---
 
@@ -734,7 +712,7 @@ function isDelinquent(address member) external view returns (bool);
 | **v1.1** | TimelockNavigator (**shipped**), BudgetNavigator (**shipped**) | Protocol, Investment DAOs |
 | **v1.2** | SignalNavigator (**shipped**), DelegateRegistryNavigator, NFTGatedNavigator (**shipped**) | 200+ member governance, credential-gated DAOs |
 | **v2.0** | VestingNavigator (**shipped**), CircuitBreakerNavigator | Core contributor compensation, safety automation |
-| **v2.1** | OracleNavigator, SubscriptionNavigator | Adaptive governance, recurring fees |
+| **v2.1** | SubscriptionNavigator (**shipped**), OracleNavigator | Recurring fees, adaptive governance |
 
 ### Navigator by DAO Configuration
 
@@ -748,7 +726,7 @@ function isDelinquent(address member) external view returns (bool);
 | VestingNavigator | -- | Useful | Critical | -- | -- | **Shipped** |
 | DelegateRegistryNavigator | -- | Useful | Critical | -- | -- | **Not built** |
 | RageKick (pattern) | -- | Useful | Useful | Required | -- | **Documented** |
-| SubscriptionNavigator | -- | -- | -- | Useful | -- | **Not built** |
+| SubscriptionNavigator | -- | Useful | -- | Useful | -- | **Shipped** |
 | OracleNavigator | -- | -- | -- | -- | Useful | **Not built** |
 | CircuitBreakerNavigator | -- | -- | Useful | Useful | Critical | **Not built** |
 | NFTGatedNavigator | Useful | Useful | Useful | -- | -- | **Shipped** |
@@ -768,7 +746,7 @@ function isDelinquent(address member) external view returns (bool);
 | VestingNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | Shipped |
 | CircuitBreakerNavigator | ADMIN (1) | `setAdminConfig` | No | ~170 |
 | OracleNavigator | GOVERNOR (4) | `setGovernanceConfig` | No | ~180 |
-| SubscriptionNavigator | MANAGER (2) | `burnShares`, `mintLoot` | No | ~190 |
+| SubscriptionNavigator | MANAGER (2) | `burnShares`, `convertSharesToLoot`, `mintLoot` | No | Shipped |
 | NFTGatedNavigator | MANAGER (2) | `mintShares`, `mintLoot` | No | Shipped |
 
 **Total planned: ~1,410 lines of Solidity** across 8 contracts, plus test suites.

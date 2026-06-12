@@ -410,6 +410,98 @@ describe("VestingNavigator", function () {
     });
   });
 
+  describe("GOVERNOR navigator pause/unpause branch", function () {
+    it("a GOVERNOR navigator (not the avatar) can pause and unpause", async function () {
+      const { daoShip, nav } = await deployVesting();
+      // setNavigators is governanceOnly (msg.sender == the DAO itself), so impersonate the
+      // DAO address — not the avatar — to register a distinct GOVERNOR (4) navigator.
+      const asDao = await asAvatar(await daoShip.getAddress());
+      const signers = await ethers.getSigners();
+      const governor = signers[6];
+      await daoShip.connect(asDao).setNavigators([governor.address], [4]); // GOVERNOR
+      expect(await daoShip.navigators(governor.address)).to.equal(4);
+
+      expect(await nav.paused()).to.equal(false);
+      await expect(nav.connect(governor).pause())
+        .to.emit(nav, "Paused")
+        .withArgs(governor.address);
+      expect(await nav.paused()).to.equal(true);
+
+      await expect(nav.connect(governor).unpause())
+        .to.emit(nav, "Unpaused")
+        .withArgs(governor.address);
+      expect(await nav.paused()).to.equal(false);
+    });
+
+    it("an address holding only MANAGER (not GOVERNOR) cannot pause", async function () {
+      const { nav, alice } = await deployVesting();
+      // The vesting nav itself holds MANAGER (2) but not GOVERNOR; alice holds nothing.
+      // Confirm a non-governor, non-avatar caller is rejected.
+      await expect(nav.connect(alice).pause()).to.be.revertedWithCustomError(nav, "NotAuthorized");
+      await expect(nav.connect(alice).unpause()).to.be.revertedWithCustomError(nav, "NotAuthorized");
+    });
+  });
+
+  describe("pause does not block claims or revokes (NatSpec invariant)", function () {
+    it("claim still succeeds and mints while paused", async function () {
+      const { nav, shares, avatar, dave } = await deployVesting();
+      const av = await asAvatar(await avatar.getAddress());
+      const start = await time.latest();
+      await nav.connect(av).createSchedule(dave.address, E(400), start, YEAR, 4 * YEAR, false);
+
+      // advance past the cliff so 25% is claimable, then pause
+      await time.setNextBlockTimestamp(start + 2 * YEAR); // 50% vested
+      await nav.connect(av).pause();
+      expect(await nav.paused()).to.equal(true);
+
+      // claim is NOT gated by pause — still mints the vested amount
+      await time.setNextBlockTimestamp(start + 2 * YEAR + 1);
+      await nav.connect(dave).claim(0);
+      expect(await shares.balanceOf(dave.address)).to.equal(
+        vestedAt(E(400), start, start + YEAR, start + 4 * YEAR, start + 2 * YEAR + 1)
+      );
+    });
+
+    it("revoke still succeeds while paused and freezes accrual", async function () {
+      const { nav, shares, avatar, dave } = await deployVesting();
+      const av = await asAvatar(await avatar.getAddress());
+      const start = await time.latest();
+      await nav.connect(av).createSchedule(dave.address, E(400), start, 0, 4 * YEAR, false);
+
+      await nav.connect(av).pause();
+      // revoke is NOT gated by pause
+      await time.setNextBlockTimestamp(start + YEAR); // 25% vested
+      await nav.connect(av).revoke(0);
+      expect((await nav.schedules(0)).revoked).to.equal(true);
+      expect(await nav.vested(0)).to.equal(E(100));
+
+      // accrual is frozen even past the schedule end
+      await time.increase(4 * YEAR);
+      expect(await nav.vested(0)).to.equal(E(100));
+      await nav.connect(dave).claim(0); // claim of the frozen portion still works while paused
+      expect(await shares.balanceOf(dave.address)).to.equal(E(100));
+    });
+
+    it("only createSchedule is gated: reverts IsPaused while claim/revoke do not", async function () {
+      const { nav, avatar, dave, eve } = await deployVesting();
+      const av = await asAvatar(await avatar.getAddress());
+      const start = await time.latest();
+      await nav.connect(av).createSchedule(dave.address, E(400), start, 0, 4 * YEAR, false);
+
+      await nav.connect(av).pause();
+      // createSchedule is blocked
+      await expect(
+        nav.connect(av).createSchedule(eve.address, E(100), 0, 0, YEAR, false)
+      ).to.be.revertedWithCustomError(nav, "IsPaused");
+
+      // claim and revoke on the existing schedule are not blocked
+      await time.setNextBlockTimestamp(start + YEAR);
+      await nav.connect(dave).claim(0); // does not revert IsPaused
+      await nav.connect(av).revoke(0); // does not revert IsPaused
+      expect((await nav.schedules(0)).revoked).to.equal(true);
+    });
+  });
+
   describe("Invariant: claimed never exceeds vested or total (scenario 10)", function () {
     it("monotone partial claims across varied checkpoints stay within bounds", async function () {
       const { nav, shares, avatar, dave } = await deployVesting();

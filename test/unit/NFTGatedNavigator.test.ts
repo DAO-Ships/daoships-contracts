@@ -460,25 +460,138 @@ describe("NFTGatedNavigator", function () {
     it("canOnboard combines eligibility, claim status, pause and expiry", async function () {
       const { nav, nft, avatar, alice } = await deployNFTGated();
       await nft.mint(alice.address, 1);
-      expect(await nav.canOnboard(alice.address, 1)).to.equal(true);
+      expect(await nav["canOnboard(address,uint256)"](alice.address, 1)).to.equal(true);
 
       await nav.connect(alice)["onboard(uint256)"](1);
-      expect(await nav.canOnboard(alice.address, 1)).to.equal(false); // claimed
+      expect(await nav["canOnboard(address,uint256)"](alice.address, 1)).to.equal(false); // claimed
 
       await nft.mint(alice.address, 2);
-      expect(await nav.canOnboard(alice.address, 2)).to.equal(true);
+      expect(await nav["canOnboard(address,uint256)"](alice.address, 2)).to.equal(true);
       const avatarSigner = await asAvatar(await avatar.getAddress());
       await nav.connect(avatarSigner).pause();
-      expect(await nav.canOnboard(alice.address, 2)).to.equal(false); // paused
+      expect(await nav["canOnboard(address,uint256)"](alice.address, 2)).to.equal(false); // paused
     });
 
     it("canOnboard returns false after expiry", async function () {
       const now = await time.latest();
       const { nav, nft, alice } = await deployNFTGated({ expiry: now + 1000 });
       await nft.mint(alice.address, 1);
-      expect(await nav.canOnboard(alice.address, 1)).to.equal(true);
+      expect(await nav["canOnboard(address,uint256)"](alice.address, 1)).to.equal(true);
       await time.increase(2000);
-      expect(await nav.canOnboard(alice.address, 1)).to.equal(false); // expired
+      expect(await nav["canOnboard(address,uint256)"](alice.address, 1)).to.equal(false); // expired
+    });
+  });
+
+  describe("canOnboard — allowlist awareness", function () {
+    it("2-arg canOnboard returns false for an eligible, allowlisted holder (conservative under-report)", async function () {
+      const [, alice, , carol] = await ethers.getSigners();
+      const leafAlice = nftLeaf(alice.address);
+      const leafCarol = nftLeaf(carol.address);
+      const root = hashPair(leafAlice, leafCarol);
+
+      const { nav, nft } = await deployNFTGated({ allowlistRoot: root });
+      await nft.mint(alice.address, 1);
+
+      // Alice is eligible (owns the token) AND on the allowlist, but the 2-arg
+      // overload never over-reports while an allowlist is configured.
+      expect(await nav.isEligibleToken(alice.address, 1)).to.equal(true);
+      expect(await nav["canOnboard(address,uint256)"](alice.address, 1)).to.equal(false);
+    });
+
+    it("3-arg canOnboard returns true for an eligible holder with a valid proof", async function () {
+      const [, alice, , carol] = await ethers.getSigners();
+      const leafAlice = nftLeaf(alice.address);
+      const leafCarol = nftLeaf(carol.address);
+      const root = hashPair(leafAlice, leafCarol);
+
+      const { nav, nft } = await deployNFTGated({ allowlistRoot: root });
+      await nft.mint(alice.address, 1);
+
+      // Valid proof for Alice is the sibling leaf (Carol).
+      expect(await nav["canOnboard(address,uint256,bytes32[])"](alice.address, 1, [leafCarol])).to.equal(true);
+    });
+
+    it("3-arg canOnboard returns false with an empty or invalid proof", async function () {
+      const [, alice, , carol] = await ethers.getSigners();
+      const leafAlice = nftLeaf(alice.address);
+      const leafCarol = nftLeaf(carol.address);
+      const root = hashPair(leafAlice, leafCarol);
+
+      const { nav, nft } = await deployNFTGated({ allowlistRoot: root });
+      await nft.mint(alice.address, 1);
+
+      // Empty proof: leaf alone does not match the 2-leaf root.
+      expect(await nav["canOnboard(address,uint256,bytes32[])"](alice.address, 1, [])).to.equal(false);
+      // Invalid proof: wrong sibling.
+      expect(await nav["canOnboard(address,uint256,bytes32[])"](alice.address, 1, [leafAlice])).to.equal(false);
+    });
+
+    it("3-arg canOnboard returns false for a token holder not on the allowlist", async function () {
+      const [, alice, bob, carol] = await ethers.getSigners();
+      const root = hashPair(nftLeaf(alice.address), nftLeaf(carol.address));
+      const { nav, nft } = await deployNFTGated({ allowlistRoot: root });
+      // Bob owns a gate NFT but is not in the allowlist tree; no proof can make him eligible.
+      await nft.mint(bob.address, 2);
+      expect(await nav["canOnboard(address,uint256,bytes32[])"](bob.address, 2, [nftLeaf(carol.address)])).to.equal(false);
+      expect(await nav["canOnboard(address,uint256,bytes32[])"](bob.address, 2, [])).to.equal(false);
+    });
+
+    it("3-arg canOnboard returns false for claimed/paused/expired even with a valid proof", async function () {
+      const now = await time.latest();
+      const [, alice, , carol] = await ethers.getSigners();
+      const leafAlice = nftLeaf(alice.address);
+      const leafCarol = nftLeaf(carol.address);
+      const root = hashPair(leafAlice, leafCarol);
+
+      // --- claimed ---
+      {
+        const { nav, nft } = await deployNFTGated({ allowlistRoot: root });
+        await nft.mint(alice.address, 1);
+        expect(await nav["canOnboard(address,uint256,bytes32[])"](alice.address, 1, [leafCarol])).to.equal(true);
+        await nav.connect(alice)["onboard(uint256,bytes32[])"](1, [leafCarol]);
+        expect(await nav["canOnboard(address,uint256,bytes32[])"](alice.address, 1, [leafCarol])).to.equal(false); // claimed
+      }
+
+      // --- paused ---
+      {
+        const { nav, nft, avatar } = await deployNFTGated({ allowlistRoot: root });
+        await nft.mint(alice.address, 3);
+        expect(await nav["canOnboard(address,uint256,bytes32[])"](alice.address, 3, [leafCarol])).to.equal(true);
+        const avatarSigner = await asAvatar(await avatar.getAddress());
+        await nav.connect(avatarSigner).pause();
+        expect(await nav["canOnboard(address,uint256,bytes32[])"](alice.address, 3, [leafCarol])).to.equal(false); // paused
+      }
+
+      // --- expired ---
+      {
+        const { nav, nft } = await deployNFTGated({ allowlistRoot: root, expiry: now + 1000 });
+        await nft.mint(alice.address, 4);
+        expect(await nav["canOnboard(address,uint256,bytes32[])"](alice.address, 4, [leafCarol])).to.equal(true);
+        await time.increase(2000);
+        expect(await nav["canOnboard(address,uint256,bytes32[])"](alice.address, 4, [leafCarol])).to.equal(false); // expired
+      }
+    });
+
+    it("agreement: 3-arg canOnboard true ⇒ onboard succeeds; allowlist-false ⇒ onboard reverts NotAllowlisted", async function () {
+      const [, alice, bob, carol] = await ethers.getSigners();
+      const leafAlice = nftLeaf(alice.address);
+      const leafCarol = nftLeaf(carol.address);
+      const root = hashPair(leafAlice, leafCarol);
+
+      const { nav, nft, shares } = await deployNFTGated({ allowlistRoot: root });
+      await nft.mint(alice.address, 1);
+      await nft.mint(bob.address, 2);
+
+      // Where the view returns true, the real onboard must succeed.
+      expect(await nav["canOnboard(address,uint256,bytes32[])"](alice.address, 1, [leafCarol])).to.equal(true);
+      await nav.connect(alice)["onboard(uint256,bytes32[])"](1, [leafCarol]);
+      expect(await shares.balanceOf(alice.address)).to.equal(ethers.parseEther("10"));
+
+      // Where the view returns false due to the allowlist, the real onboard must revert.
+      expect(await nav["canOnboard(address,uint256,bytes32[])"](bob.address, 2, [leafCarol])).to.equal(false);
+      await expect(
+        nav.connect(bob)["onboard(uint256,bytes32[])"](2, [leafCarol])
+      ).to.be.revertedWithCustomError(nav, "NotAllowlisted");
     });
   });
 });

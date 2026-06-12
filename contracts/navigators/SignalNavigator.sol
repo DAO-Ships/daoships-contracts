@@ -142,7 +142,7 @@ contract SignalNavigator is INavigator {
 
     /**
      * @param _daoShip DAOShip DAO address (read for voting power and avatar)
-     * @param _minSharesToCreatePoll Minimum voting power (at creation) to open a poll (0 = anyone with power)
+     * @param _minSharesToCreatePoll Minimum voting power (at creation) to open a poll (0 = ungated; any caller may open a poll, even with no voting power)
      * @param _minDuration Minimum voting-window length in seconds (must be > 0)
      * @param _maxDuration Maximum voting-window length in seconds (>= _minDuration)
      * @param _maxStartDelay Maximum scheduling lead time in seconds (0 = immediate-only)

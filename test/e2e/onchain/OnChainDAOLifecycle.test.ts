@@ -359,8 +359,11 @@ async function waitUntilGraceEnded(
  */
 
 describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
-  // Dynamic timeout: 5 governance proposals × (voting + grace + 20s checkpoint + 30s buffer) + base overhead
-  // Phase 2b (ERC20TributeNavigator) adds no governance proposals — overhead only
+  // Dynamic timeout: 10 full submit→vote→(voting+grace)→process proposal cycles ×
+  //   (voting + grace + 20s checkpoint + 30s buffer) + base overhead.
+  // The 10 cycles: legacy 5 (Phases 4, 6, 10, 12, 18) + Phase 2f Vesting (1) + Phase 2g
+  //   Timelock (1) + Phase 2h Budget (2: enableModule + createBudget) + Phase 2i Subscription (1).
+  // Phase 2b (ERC20TributeNavigator) adds no governance proposals — overhead only.
   const votingPeriodSec = parseInt(process.env.VOTING_PERIOD || "3600");
   const gracePeriodSec = parseInt(process.env.GRACE_PERIOD || "60");
   const perProposalMs = (votingPeriodSec + gracePeriodSec + 50) * 1000;
@@ -372,7 +375,10 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   // the EVM clock lags real time on Orchard, so advancing it 600s can take well over 600s.
   const timelockDelayWaitMs = (600 * 3 + 300) * 1000;
   // Phase 2h (BudgetNavigator) adds 2 governance proposals (enableModule + createBudget).
-  const dynamicTimeout = (7 * perProposalMs) + baseOverheadMs + timelockDelayWaitMs;
+  // Phase 2i (SubscriptionNavigator) adds 1 governance proposal (enroll). Collection past
+  // grace is NOT exercised on-chain — MIN_PERIOD (1h) would blow the budget; it is covered
+  // by the unit + local e2e suites. The Phase 2f/2g proposal cycles are included in the 10.
+  const dynamicTimeout = (10 * perProposalMs) + baseOverheadMs + timelockDelayWaitMs;
   this.timeout(dynamicTimeout);
 
   let provider: quais.JsonRpcProvider;
@@ -394,6 +400,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   let vestingNavigator: quais.Contract; // MANAGER, cliff+linear vesting
   let timelockNavigator: quais.Contract; // GOVERNOR, delayed governance-config changes
   let budgetNavigator: quais.Contract; // NO permission, vault module — treasury budgets
+  let subscriptionNavigator: quais.Contract; // MANAGER, recurring membership dues
   let nftGateToken: quais.Contract; // MockERC721 gate collection
   let tributeToken: quais.Contract;
 
@@ -409,6 +416,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
   let VestingNavigatorABI: any;
   let TimelockNavigatorABI: any;
   let BudgetNavigatorABI: any;
+  let SubscriptionNavigatorABI: any;
   let MockERC721ABI: any;
   let MockERC20ABI: any;
 
@@ -589,6 +597,12 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     BudgetNavigatorABI = JSON.parse(
       fs.readFileSync(
         path.join(artifactsDir, "navigators/BudgetNavigator.sol/BudgetNavigator.json"),
+        "utf-8"
+      )
+    ).abi;
+    SubscriptionNavigatorABI = JSON.parse(
+      fs.readFileSync(
+        path.join(artifactsDir, "navigators/SubscriptionNavigator.sol/SubscriptionNavigator.json"),
         "utf-8"
       )
     ).abi;
@@ -1048,6 +1062,46 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log(`   ✅ BudgetNavigator: ${budgetNavigatorAddress} (NO permission, vault module)\n`);
     budgetNavigator = budgetNavigatorInstance;
 
+    // Deploy SubscriptionNavigator for Phase 2i (recurring membership dues). MANAGER permission
+    // (added to the navigators[] array below) so collectFee() can convert/burn shares + mint the
+    // keeper reward. Native-QUAI fee menu (address(0)) at MIN_PERIOD so Phase 2i can pay real dues
+    // into the vault without deploying a fee ERC20. Convert mode (burnOnCollect = false).
+    console.log("   Deploying SubscriptionNavigator...");
+    const SubscriptionNavigatorJson = JSON.parse(
+      fs.readFileSync(
+        path.join(__dirname, "../../../artifacts/contracts/navigators/SubscriptionNavigator.sol/SubscriptionNavigator.json"),
+        "utf-8"
+      )
+    );
+    const subscriptionIpfsHash = await pushMetadataWithRetry(SubscriptionNavigatorJson.bytecode, "SubscriptionNavigator");
+    const SubscriptionNavigatorFactory = new quais.ContractFactory(
+      SubscriptionNavigatorABI,
+      SubscriptionNavigatorJson.bytecode,
+      deployer,
+      subscriptionIpfsHash
+    );
+    const SUBSCRIPTION_PERIOD = 3600; // MIN_PERIOD (1 hour)
+    const SUBSCRIPTION_GRACE = 600;
+    const SUBSCRIPTION_FEE = quais.parseQuai("0.01"); // per period, native QUAI
+    // constructor: daoShip, tokens[], feesPerPeriod[], period, grace, start, collectorBps, burnOnCollect, initialMembers[], name, desc
+    const subscriptionNavigatorInstance = await SubscriptionNavigatorFactory.deploy(
+      predictedDAOShipAddress,
+      [quais.ZeroAddress],
+      [SUBSCRIPTION_FEE],
+      SUBSCRIPTION_PERIOD,
+      SUBSCRIPTION_GRACE,
+      0,
+      100, // 1% keeper reward
+      false, // convert delinquent shares to loot
+      [],
+      "Subscription",
+      "recurring membership dues"
+    );
+    await subscriptionNavigatorInstance.waitForDeployment();
+    const subscriptionNavigatorAddress = await subscriptionNavigatorInstance.getAddress();
+    console.log(`   ✅ SubscriptionNavigator: ${subscriptionNavigatorAddress} (MANAGER)\n`);
+    subscriptionNavigator = subscriptionNavigatorInstance;
+
     // Configuration from .env.e2e
     const votingPeriod = parseInt(process.env.VOTING_PERIOD || "3600"); // 1 hour minimum (M-7 fix)
     const gracePeriod = parseInt(process.env.GRACE_PERIOD || "60");
@@ -1082,9 +1136,10 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
       nftGatedNavigatorAddress,     // NFTGatedNavigator for Phase 2d
       vestingNavigatorAddress,      // VestingNavigator for Phase 2f
       timelockNavigatorAddress,     // TimelockNavigator for Phase 2g (GOVERNOR)
+      subscriptionNavigatorAddress, // SubscriptionNavigator for Phase 2i (MANAGER)
       deployer.address  // Deployer as MANAGER for direct mint operations
     ];
-    const navigatorPermissions: number[] = [2, 2, 2, 2, 4, 2]; // MANAGER = 2, Timelock = GOVERNOR (4)
+    const navigatorPermissions: number[] = [2, 2, 2, 2, 4, 2, 2]; // MANAGER = 2, Timelock = GOVERNOR (4)
 
     // Encode initialization params (must match DAOShip.setUp() signature)
     const initializationParams = quais.AbiCoder.defaultAbiCoder().encode(
@@ -1278,6 +1333,8 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log("═══════════════════════════════════════════════════════════\n");
 
     const bobShares = await shares.balanceOf(bob.address);
+    const onboarderVault = await daoShip.avatar();
+    const vaultBefore = await provider.getBalance(onboarderVault);
     console.log(`Bob shares before: ${quais.formatQuai(bobShares)}`);
 
     const tributeAmount = quais.parseQuai("0.5");
@@ -1296,7 +1353,12 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log(`Bob shares after: ${quais.formatQuai(bobSharesAfter)}`);
     console.log(`   (+${quais.formatQuai(bobSharesAfter - bobShares)} shares)\n`);
 
-    expect(bobSharesAfter).to.be.gt(bobShares);
+    // Exact mint (multiplier mode: shares = tribute * shareMultiplier / 10000) and the full
+    // tribute (cost == msg.value) must reach the vault treasury — not merely "shares went up".
+    const shareMultiplier = await onboarderNavigator.shareMultiplier();
+    const expectedShares = (tributeAmount * shareMultiplier) / 10000n;
+    expect(bobSharesAfter).to.equal(bobShares + expectedShares);
+    expect(await provider.getBalance(onboarderVault)).to.equal(vaultBefore + tributeAmount);
   });
 
   it("Should onboard Carol via ERC20TributeNavigator", async function () {
@@ -1342,7 +1404,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log(`Treasury USDC after:  ${quais.formatQuai(treasuryTokensAfter)}`);
     console.log(`   (+${quais.formatQuai(carolSharesAfter - carolShares)} shares)\n`);
 
-    expect(carolSharesAfter).to.be.gt(carolShares);
+    expect(carolSharesAfter).to.equal(carolShares + sharesToMint); // exact mint, matching the permit phase
     expect(treasuryTokensAfter).to.equal(treasuryTokensBefore + expectedTribute);
   });
 
@@ -1892,12 +1954,104 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     try {
       const tx = await budgetNavigator.connect(deployer).disburse(budgetId!, carol.address, DISBURSE);
       await tx.wait();
-    } catch {
+    } catch (err: any) {
       capReverted = true;
+      console.log(`   ↩︎ over-allowance disburse reverted as expected: ${err?.shortMessage || err?.message || err}`);
     }
     expect(capReverted, "a disburse exceeding the period allowance should revert").to.equal(true);
 
     console.log(`✅ BudgetNavigator treasury disbursement working on-chain (vault module, cap-bounded)\n`);
+  });
+
+  it("Should pay recurring dues via SubscriptionNavigator (NavigatorSet → payFee → enroll)", async function () {
+    console.log("═══════════════════════════════════════════════════════════");
+    console.log("PHASE 2i: Recurring Membership Dues (SubscriptionNavigator)");
+    console.log("═══════════════════════════════════════════════════════════\n");
+
+    const subAddress = await subscriptionNavigator.getAddress();
+
+    // 1) It was registered with MANAGER (2) at launch (in the navigators[] array) — the standard
+    //    permissioned path, so NavigatorSet(addr, 2) fired and trust is sanctioned.
+    expect(await daoShip.navigators(subAddress)).to.equal(2n);
+    console.log("   ✅ SubscriptionNavigator holds MANAGER (2) on the DAO\n");
+
+    // 2) Deployer pays THREE periods of dues in native QUAI → forwarded to the real vault.
+    //    Pre-paying multiple periods keeps the deployer comfortably current through the
+    //    intervening enroll proposal, so the step-5 collect gate cannot flip if a slow run
+    //    (or a larger VOTING_PERIOD) lets a single period lapse mid-phase.
+    //    The vault (daoShip.avatar()) native balance is read for the fee-forwarding delta.
+    const FEE = await subscriptionNavigator.feePerPeriod(quais.ZeroAddress); // 0.01 QUAI
+    const PERIODS_PAID = 3n;
+    const totalDue = FEE * PERIODS_PAID;
+    const vaultBefore = await provider.getBalance(vault);
+    const payTx = await subscriptionNavigator.connect(deployer).payFee(PERIODS_PAID, quais.ZeroAddress, { value: totalDue });
+    await payTx.wait();
+    expect((await provider.getBalance(vault)) - vaultBefore).to.equal(totalDue);
+    expect(await subscriptionNavigator.isCurrent(deployer.address)).to.equal(true);
+    expect(await subscriptionNavigator.isEnrolled(deployer.address)).to.equal(true);
+    console.log(`   ✅ Paid ${quais.formatQuai(totalDue)} QUAI dues (3 periods) → forwarded to the vault; deployer is current\n`);
+
+    // 3) Exact-value enforcement: a wrong msg.value reverts on-chain (IncorrectPayment).
+    let badValueReverted = false;
+    try {
+      const tx = await subscriptionNavigator.connect(deployer).payFee(1, quais.ZeroAddress, { value: FEE * 2n });
+      await tx.wait();
+    } catch (err: any) {
+      badValueReverted = true;
+      console.log(`   ↩︎ payFee wrong-value reverted as expected: ${err?.shortMessage || err?.message || err}`);
+    }
+    expect(badValueReverted, "an incorrect native msg.value should revert").to.equal(true);
+
+    // 4) Governance enrolls Bob via a proposal (avatar-only) — one complimentary period.
+    async function runProposal(
+      actions: Array<{ operation: number; to: string; value: bigint; data: string }>,
+      title: string,
+      description: string
+    ) {
+      const proposalData = encodeMultiSend(actions);
+      const submitTx = await daoShip.connect(deployer).submitProposal(proposalData, 0, JSON.stringify({ title, description }));
+      const submitReceipt = await submitTx.wait();
+      const proposalEvent = submitReceipt.logs.find((log: any) => {
+        try { return daoShip.interface.parseLog(log)?.name === "SubmitProposal"; } catch { return false; }
+      });
+      const proposalId = daoShip.interface.parseLog(proposalEvent!)?.args[0];
+      console.log(`   ✅ Proposal #${proposalId} submitted (${title})`);
+      await waitPastVotingStarts(provider, daoShip, proposalId, "votingStarts");
+      await (await daoShip.connect(deployer).submitVote(proposalId, true)).wait();
+      await (await daoShip.connect(alice).submitVote(proposalId, true)).wait();
+      const votingPeriod = parseInt(process.env.VOTING_PERIOD || "3600");
+      const gracePeriod = parseInt(process.env.GRACE_PERIOD || "30");
+      await new Promise((resolve) => setTimeout(resolve, (votingPeriod + gracePeriod) * 1000));
+      await waitUntilGraceEnded(provider, daoShip, proposalId);
+      const processTx = await daoShip.connect(deployer).processProposal(proposalId, proposalData);
+      await (await processTx).wait();
+      return processTx;
+    }
+
+    const enrollData = subscriptionNavigator.interface.encodeFunctionData("enroll", [bob.address]);
+    await runProposal(
+      [{ operation: 0, to: subAddress, value: 0n, data: enrollData }],
+      "Enroll Bob in the subscription",
+      "Governance enroll → one complimentary period before dues begin"
+    );
+    expect(await subscriptionNavigator.isEnrolled(bob.address)).to.equal(true);
+    expect(await subscriptionNavigator.isCurrent(bob.address)).to.equal(true);
+    console.log("   ✅ Bob enrolled by governance (complimentary period)\n");
+
+    // 5) The collect gate is enforced on-chain: a current member is not collectible. (Full
+    //    delinquency → collect is proven in the unit + local e2e — MIN_PERIOD's 1h wait would
+    //    blow this suite's time budget, so it is not exercised on-chain.)
+    let notDelinquentReverted = false;
+    try {
+      const tx = await subscriptionNavigator.connect(carol).collectFee(deployer.address);
+      await tx.wait();
+    } catch (err: any) {
+      notDelinquentReverted = true;
+      console.log(`   ↩︎ collectFee on a current member reverted as expected: ${err?.shortMessage || err?.message || err}`);
+    }
+    expect(notDelinquentReverted, "collecting a current member should revert NotDelinquent").to.equal(true);
+
+    console.log(`✅ SubscriptionNavigator dues working on-chain (MANAGER, native fee → vault, governance enroll)\n`);
   });
 
   it("Should submit, vote, and process funding proposal", async function () {
@@ -2211,7 +2365,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log(`Carol loot after: ${quais.formatQuai(carolLootAfter)}`);
     console.log(`   (+${quais.formatQuai(carolLootAfter - carolLootBefore)} loot)\n`);
 
-    expect(carolLootAfter).to.be.gt(carolLootBefore);
+    expect(carolLootAfter).to.equal(carolLootBefore + quais.parseQuai("50")); // exact minted amount
   });
 
   it("Should burn shares and loot (BurnShares, BurnLoot events)", async function () {
@@ -2448,9 +2602,10 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log("PHASE 11: Cancel Proposal");
     console.log("═══════════════════════════════════════════════════════════\n");
 
-    // Submit a proposal that doesn't meet threshold (won't auto-sponsor)
-    // We'll reduce deployer's shares temporarily by having them transfer to Bob
-    // This ensures the proposal won't auto-sponsor
+    // Alice (50 shares >= sponsorThreshold) submits and therefore AUTO-SPONSORS, so the
+    // proposal lands in Voting state. This phase exercises cancellation of a *sponsored*
+    // proposal by its own submitter (a cancellable state). The unsponsored Submitted-state
+    // cancel branch is covered by the unit suite.
 
     const proposalData = encodeMultiSend([
       {
@@ -3021,7 +3176,7 @@ describe("E2E: Complete DAO Lifecycle + Event Coverage (Cyprus1)", function () {
     console.log("   ✅ LockManager (Phase 12)");
     console.log("   ✅ LockGovernor (Phase 12)");
     console.log("\n   Token Operations (4/4):");
-    console.log("   ✅ MintShares (Phases 2, 3, 8)");
+    console.log("   ✅ MintShares (Phases 2, 3)");
     console.log("   ✅ MintLoot (Phase 7)");
     console.log("   ✅ BurnShares (Phase 8)");
     console.log("   ✅ BurnLoot (Phase 8)");

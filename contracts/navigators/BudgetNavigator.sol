@@ -284,7 +284,7 @@ contract BudgetNavigator is ReentrancyGuard, INavigator {
      * @param amount Amount to disburse (> 0)
      */
     function disburse(uint256 budgetId, address to, uint256 amount) external nonReentrant {
-        Budget storage b = _authorizeSpend(budgetId);
+        (Budget storage b, address avatar) = _authorizeSpend(budgetId);
         if (to == address(0)) revert InvalidRecipient();
         if (amount == 0) revert ZeroAmount();
 
@@ -296,8 +296,9 @@ contract BudgetNavigator is ReentrancyGuard, INavigator {
         b.spentThisPeriod += amount;
         b.totalSpent += amount;
 
-        _transfer(b.token, to, amount);
-        emit Disbursed(budgetId, to, b.token, amount);
+        address token = b.token; // cache: read once for the transfer and the event
+        _transfer(avatar, token, to, amount);
+        emit Disbursed(budgetId, to, token, amount);
     }
 
     /**
@@ -315,7 +316,7 @@ contract BudgetNavigator is ReentrancyGuard, INavigator {
         address[] calldata to,
         uint256[] calldata amounts
     ) external nonReentrant {
-        Budget storage b = _authorizeSpend(budgetId);
+        (Budget storage b, address avatar) = _authorizeSpend(budgetId);
         uint256 n = to.length;
         if (n != amounts.length) revert LengthMismatch();
         if (n == 0) revert EmptyBatch();
@@ -337,7 +338,7 @@ contract BudgetNavigator is ReentrancyGuard, INavigator {
 
         address token = b.token;
         for (uint256 i = 0; i < n; i++) {
-            _transfer(token, to[i], amounts[i]);
+            _transfer(avatar, token, to[i], amounts[i]);
             emit Disbursed(budgetId, to[i], token, amounts[i]);
         }
     }
@@ -404,16 +405,19 @@ contract BudgetNavigator is ReentrancyGuard, INavigator {
      * @dev Shared disbursement preamble: resolves the budget, enforces that the caller
      *      is the manager, the navigator is unpaused, the budget is live, and this
      *      navigator is actually an enabled module on the vault (clear error instead of
-     *      an opaque transfer failure). Returns the storage pointer for the caller.
+     *      an opaque transfer failure). Returns the budget storage pointer AND the vault
+     *      (avatar) address — resolved once here so disburse/disburseBatch reuse it for
+     *      every transfer instead of re-fetching it per recipient.
      */
-    function _authorizeSpend(uint256 budgetId) private view returns (Budget storage b) {
+    function _authorizeSpend(uint256 budgetId) private view returns (Budget storage b, address avatar) {
         if (paused) revert IsPaused();
         b = _getBudget(budgetId);
         if (msg.sender != b.manager) revert NotAuthorized();
         if (b.cancelled) revert BudgetCancelled_();
         if (block.timestamp < b.startsAt) revert NotStarted();
         if (b.endsAt != 0 && block.timestamp >= b.endsAt) revert BudgetEnded();
-        if (!IAvatar(daoShip.avatar()).isModuleEnabled(address(this))) revert NotEnabledModule();
+        avatar = daoShip.avatar();
+        if (!IAvatar(avatar).isModuleEnabled(address(this))) revert NotEnabledModule();
     }
 
     /**
@@ -434,10 +438,11 @@ contract BudgetNavigator is ReentrancyGuard, INavigator {
     /**
      * @dev Move treasury assets out of the vault via the module path. Native and ERC20
      *      branches mirror DAOShip.ragequit exactly. Hardcoded to Operation.Call —
-     *      this navigator never performs a DelegateCall.
+     *      this navigator never performs a DelegateCall. `avatar` (the vault) is resolved
+     *      once by `_authorizeSpend` and passed in, so a batch makes no per-recipient
+     *      `daoShip.avatar()` call.
      */
-    function _transfer(address token, address to, uint256 amount) private {
-        address avatar = daoShip.avatar();
+    function _transfer(address avatar, address token, address to, uint256 amount) private {
         bool success;
         if (token == address(0)) {
             success = IAvatar(avatar).execTransactionFromModule(to, amount, "", Enum.Operation.Call);
