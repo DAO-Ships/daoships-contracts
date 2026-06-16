@@ -549,7 +549,8 @@ event PollCancelled(uint256 indexed pollId, address indexed caller);
 
 **Handler action — `PollCreated`:**
 - Insert a poll row keyed by `(navigator_address, poll_id)`.
-- `question` is an IPFS CID or short text (same convention as proposal / Poster content) — resolve off-chain if it is a CID.
+- `question` is an IPFS CID or short text (same convention as proposal / Poster content) — resolve off-chain if it is a CID. This is the **canonical headline**.
+- **Option labels are off-chain.** `PollCreated` carries only `optionCount`; options are bare indices `0..optionCount-1`. The index→label map (plus optional `description` / `discussionUrl`) arrives via a `daoships.signal.poll` Poster post keyed by `(navigatorAddress, pollId)`. Trust it ONLY when the Poster `msg.sender == PollCreated.creator`, require `options.length == optionCount` (else discard and render `Option 1..n`), and apply last-write-wins per creator. The labels post is a separate tx that normally lands *after* this event — if it arrives first, hold it keyed by `(navigatorAddress, pollId)` and apply on `PollCreated` (hold-until-discovered). See [POSTER.md → Signal Poll Options](POSTER.md#signal-poll-options-daoshipssignalpoll).
 - **Status is time-derived, not event-driven.** There is no "poll opened" or "poll ended" event. Compute status from the timestamps exactly as the contract's `pollStatus()` does: `Pending` while `now < votingStarts`, `Active` while `votingStarts <= now < votingEnds`, `Ended` once `now >= votingEnds`, `Cancelled` if the cancelled flag is set (terminal, overrides the others).
 - `snapshotTimestamp = votingStarts - 1` is the timepoint at which every voter's weight is measured (delegation-aware `getPriorVotes`). Store it if you reconstruct or verify tallies.
 
@@ -584,13 +585,18 @@ CREATE TABLE ds_signal_polls (
     navigator_address VARCHAR(42) NOT NULL,
     poll_id NUMERIC(78,0) NOT NULL,        -- per-navigator, starts at 0
     creator VARCHAR(42) NOT NULL,
-    question TEXT,                          -- IPFS CID or short text
+    question TEXT,                          -- IPFS CID or short text (canonical headline, from PollCreated)
     option_count SMALLINT NOT NULL,         -- 2..10
     snapshot_timestamp BIGINT NOT NULL,     -- votingStarts - 1 (weight timepoint)
     voting_starts BIGINT NOT NULL,
     voting_ends BIGINT NOT NULL,
     cancelled BOOLEAN DEFAULT FALSE,
     tally NUMERIC(78,0)[] DEFAULT '{}',     -- per-option running totals (index = option)
+    -- Off-chain option labels (Poster `daoships.signal.poll`, msg.sender == creator; len(options)==option_count)
+    options TEXT[],                         -- index->label map; NULL until labels post seen (render Option 1..n)
+    description TEXT,                        -- optional poll context
+    discussion_url TEXT,                    -- optional forum/discussion link
+    labels_updated_at TIMESTAMPTZ,          -- last-write-wins timestamp of the labels post
     tx_hash VARCHAR(66),
     created_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -933,21 +939,24 @@ event NewPost(
 - Parse `content` as JSON if it starts with `{`
 - See [docs/POSTER.md](POSTER.md) for the complete domain schema and trust model
 
-**Tag-based routing (7 tags total — see [POSTER.md](POSTER.md) for full schemas):**
+**Tag-based routing (8 tags total — see [POSTER.md](POSTER.md) for full schemas):**
 
 | Tag | Action | Trust Check |
 |-----|--------|-------------|
 | `daoships.dao.profile.initial` | Create DAO metadata | `msg.sender` == deployer from launch event |
-| `daoships.dao.profile` | Create/update DAO metadata (invalidates initial) | `msg.sender` == vault address |
+| `daoships.dao.profile` | Create/update DAO metadata incl. brand `theme` palette (invalidates initial) | `msg.sender` == vault address |
 | `daoships.dao.announcement` | Store as DAO announcement | `msg.sender` == vault address |
 | `daoships.member.profile` | Create/update member metadata | `msg.sender` has shares > 0 |
 | `daoships.proposal.vote.reason` | Associate with vote record (one per voter per proposal) | `msg.sender` matches voter in SubmitVote |
 | `daoships.navigator.allowlist` | Store Merkle tree for navigator allowlist proof generation | `msg.sender` has shares > 0 (MEMBER trust) |
 | `daoships.dao.navigators` | Set sanctioned read-only navigators (updates `ds_navigators.trust_status`) — see [Protecting DAOs from spam read-only navigators](#protecting-daos-from-spam-read-only-navigators) | `msg.sender` == vault address |
+| `daoships.signal.poll` | Set/update option labels + description/discussion link for a poll, keyed by `(navigatorAddress, pollId)` (last-write-wins; `options.length` must equal on-chain `optionCount`) | `msg.sender` == `PollCreated.creator` for that poll |
 
 **IMPORTANT:** Never index a post based on tag alone. Always verify `msg.sender` against the trust model before writing to the database. Discard posts where content exceeds 16 KB.
 
 **Schema versioning:** All Poster content includes `schemaVersion`. Content without it is treated as version `0.0`.
+
+**Brand theme (`dao.profile.theme`, schema 1.1+):** The `daoships.dao.profile` (and `.initial`) content may carry an optional `theme` object (`mode`, `primary`, `secondary`, `accent`, `background`, `surface`, `text`) — store it as-is in `ds_daos.theme` (JSONB). Treat `theme` as a **whole field** under the profile's last-write-wins merge (like `links`): a post's `theme` replaces the stored one, `null` clears it, omission leaves it unchanged — do **not** deep-merge tokens. The indexer MAY drop tokens that fail strict-hex validation (`^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$`) on ingest, but the **render-time** hex check is mandatory on the frontend regardless (CSS-injection guard — see [POSTER.md → Security: Content Rendering](POSTER.md#security-content-rendering)). `avatar`/`banner` are unchanged — `theme` adds colors only, no background image.
 
 **`details` field convention:** The `SubmitProposal` event's `details` string should be parsed as JSON when possible. Extract `title` and `type` for display, and `discussionUrl` for linking to off-chain discussion. Fall back to plain text if not valid JSON. See [POSTER.md](POSTER.md) for the convention.
 
@@ -995,10 +1004,12 @@ CREATE TABLE ds_daos (
     proposal_count INTEGER DEFAULT 0,
     active_member_count INTEGER DEFAULT 0,
 
-    -- Metadata (from Poster)
+    -- Metadata (from Poster `dao.profile` / `dao.profile.initial`)
     name VARCHAR(255),
     description TEXT,
-    avatar_img TEXT,                        -- IPFS CID or URL
+    avatar_img TEXT,                        -- IPFS CID or URL (the DAO icon)
+    banner_img TEXT,                        -- IPFS CID or URL (the DAO banner)
+    theme JSONB,                            -- brand palette (schema 1.1+); colors must pass strict-hex check before CSS use
 
     -- Tracking
     created_at TIMESTAMPTZ,

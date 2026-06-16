@@ -14,12 +14,12 @@
 
 | Contract | Address |
 |----------|---------|
-| **Poster** | `0x000fDaA55dD7d46b5802250F932d0fEd5465E0f8` |
-| **DAOShipSingleton** | `0x00670fa8666615Fb9Ad971EE829fa2333e866c5b` |
-| **SharesERC20Singleton** | `0x007522Ae0576a9e1B88751E18dbD31Cb6D952e57` |
-| **LootERC20Singleton** | `0x00334AFfcC0e61fd734134ddcd4524ecCB7eF6A8` |
-| **DAOShipLauncher** | `0x007e532914AF668F40590d1BdB62d714F0dF84Bd` |
-| **DAOShipAndVaultLauncher** | `0x006d31EE6E7A2A800693B52Bcf2E7C8d137DBa53` |
+| **Poster** | `0x0028DCeb1CAfb4d6B2B5f69313329Aeb0E66cf34` |
+| **DAOShipSingleton** | `0x004c1BCDf5Bf30c0cd8Aa1d9A5c4c49FF3368dd9` |
+| **SharesERC20Singleton** | `0x003b6C160596e5Ac87044bAAe05750e6A9862FdD` |
+| **LootERC20Singleton** | `0x00085a2D9b407671270362087AC0fe5E272D0582` |
+| **DAOShipLauncher** | `0x003BD5aC6f75cFA8E1949Eb9A5EB967966c1b455` |
+| **DAOShipAndVaultLauncher** | `0x0030d87f987F24603108bEe81cE212a007Bfb6dD` |
 
 ### Navigator Singletons
 
@@ -31,9 +31,9 @@
 
 | Contract | Address |
 |----------|---------|
-| **QuaiVaultFactory** | `0x00613Bd358C36Bed84bf64A9F1bC632d3125779b` |
-| **QuaiVault Implementation** | `0x0006bFD36432079e4E813E383A8FD60f7a131388` |
-| **MultiSend Library** | `0x00465B948541CE357ea54BD3C3d8B9995097d199` |
+| **QuaiVaultFactory** | `0x002d1305D597c157bB975967FA2e5337674b0E5F` |
+| **QuaiVault Implementation** | `0x004E539Cf477A5Cb456A56023f083cD91Bc4934e` |
+| **MultiSend Library** | `0x002ae8A47C2da497fe569AfCF0486410aA1093E0` |
 
 ---
 
@@ -397,7 +397,7 @@ await daoShip.submitProposal(proposalData, 0, "Fund community event", {
 ### Post Metadata via Poster
 
 ```typescript
-const POSTER_ADDRESS = "0x000fDaA55dD7d46b5802250F932d0fEd5465E0f8";
+const POSTER_ADDRESS = "0x0028DCeb1CAfb4d6B2B5f69313329Aeb0E66cf34";
 const poster = new quais.Contract(POSTER_ADDRESS, [
   "function post(string content, string tag) external",
   "event NewPost(address indexed user, string content, string indexed tag)",

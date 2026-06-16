@@ -38,8 +38,9 @@ Tags follow hierarchical dot-notation: `daoships.<context>.<action>`
 | `daoships.proposal.vote.reason` | Voter (directly, after voting) | Why they voted the way they did |
 | `daoships.navigator.allowlist` | Navigator deployer (directly) | Merkle tree for address-gated onboarding |
 | `daoships.dao.navigators` | DAO vault (via governance proposal) | Authenticated allowlist of **read-only** navigators the DAO sanctions (endorsement, grants no permission) |
+| `daoships.signal.poll` | Poll creator (directly, after `createPoll`) | Option labels + description / discussion link for a SignalNavigator poll (the index→label map the contract keeps off-chain) |
 
-**That's it.** Seven tags. Everything else belongs off-chain.
+**That's it.** Eight tags. Everything else belongs off-chain.
 
 ### What Does NOT Belong in Poster
 
@@ -54,7 +55,7 @@ Tags follow hierarchical dot-notation: `daoships.<context>.<action>`
 | Navigator metadata (name, description) | Now handled by `NavigatorDeployed` event in `INavigator` — emitted atomically at construction, unforgeable | `NavigatorDeployed` event |
 | Navigator upgrade context | Already captured by `NavigatorSet` events + proposal details | Proposal `details` field |
 | Cross-DAO endorsements | Political/social — not indexer data | DAO website, social media |
-| Signal voting / polls (the poll & vote data) | Handled on-chain by `SignalNavigator` events (`PollCreated` / `Voted` / `PollCancelled`) — wallet-attributed already | `SignalNavigator` contract events. (Note: *sanctioning* a SignalNavigator address — vs. the poll data — DOES use Poster: `daoships.dao.navigators`, below) |
+| Signal poll & vote *data* (the question, tally, votes) | Handled on-chain by `SignalNavigator` events (`PollCreated` / `Voted` / `PollCancelled`) — wallet-attributed already | `SignalNavigator` contract events. (Two carve-outs that DO use Poster: *sanctioning* a SignalNavigator address → `daoships.dao.navigators`; and a poll's *option labels* → `daoships.signal.poll`, both below) |
 | Member governance statements | Blog post — no trust benefit over a forum profile | Forum, personal site |
 
 ---
@@ -94,7 +95,7 @@ Posted by the DAO vault via governance proposal. Supersedes any `daoships.dao.pr
 
 ```json
 {
-  "schemaVersion": "1.0",
+  "schemaVersion": "1.1",
   "daoAddress": "0x00...*",
   "name": "My DAO*",
   "description": "A community treasury for...*",
@@ -107,12 +108,53 @@ Posted by the DAO vault via governance proposal. Supersedes any `daoships.dao.pr
     "forum": "https://forum.mydao.xyz",
     "github": "https://github.com/mydao"
   },
+  "theme": {
+    "mode": "dark",
+    "primary": "#5B8DEF",
+    "secondary": "#22D3AA",
+    "accent": "#F59E0B",
+    "background": "#0E1116",
+    "surface": "#171B22",
+    "text": "#E6EAF2"
+  },
   "tags": ["defi", "investment", "quai"],
   "chainId": 9000
 }
 ```
 
 **Partial updates:** To update specific fields without reposting everything, post with tag `daoships.dao.profile` and include only the fields being changed plus `daoAddress` and `schemaVersion`. Indexers merge using last-write-wins: a field set to `null` removes it, an omitted field is unchanged, an empty string `""` sets the field to empty.
+
+#### Brand theme (`theme`, schema 1.1+)
+
+Optional palette so a DAO can theme webapps that render it. `avatar` (icon) and `banner` remain the
+DAO's images — `theme` adds only **colors**. All fields are optional; the frontend fills any unset
+token from its own defaults, using `mode` to choose the light/dark base.
+
+| Field | Notes |
+|-------|-------|
+| `mode` | `"light"` or `"dark"` — which base the palette targets; drives the fallback for unset tokens |
+| `primary` | Brand color: buttons, links, active/selected states |
+| `secondary` | Secondary actions / accents |
+| `accent` | Highlights, badges, notifications |
+| `background` | Page background color |
+| `surface` | Cards / panels; defaults to a derived tint of `background` |
+| `text` | Primary foreground; defaults from `mode` + contrast |
+
+Only `primary` and `background` meaningfully need setting; the rest are optional refinements. There is
+no background *image* — branding imagery is `avatar` + `banner`; `theme` is colors only.
+
+- **Color format — strict hex, enforced.** Every theme color MUST match `^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$`.
+  A value that does not match is dropped (the default token is used). This is a security boundary, not a
+  nicety — see [Security: Content Rendering](#security-content-rendering), rule 7.
+- **Accessibility is the frontend's duty.** A DAO can post unreadable pairs (e.g. `text` == `background`).
+  Frontends SHOULD check posted pairs against WCAG AA (4.5:1 for text, 3:1 for UI / large text) and fall
+  back to a default token when a pair fails, rather than render unreadable content.
+- **`theme` is replaced as a whole**, like `links`: it is a single field. To change one color, repost the
+  complete `theme` block you want; `"theme": null` clears it; omitting `theme` leaves the current one
+  unchanged. Indexers do **not** deep-merge individual tokens.
+
+The same `theme` block is also valid in `daoships.dao.profile.initial` (same rules), so a deployer may
+set a launch palette before governance exists.
 
 ### DAO Announcement (`daoships.dao.announcement`)
 
@@ -237,6 +279,58 @@ Posted by the DAO **vault via a governance proposal**. This is the DAO's authent
 
 **Deduplication:** Key: `msg.sender` (vault) + `tag` + `daoAddress`. Last-write-wins.
 
+### Signal Poll Options (`daoships.signal.poll`)
+
+Posted by the **poll creator** directly, immediately after `createPoll`. Carries the index→label
+mapping the `SignalNavigator` deliberately keeps off-chain — the contract stores only `optionCount`,
+so options are bare indices `0..optionCount-1` (see `docs/SIGNAL_NAVIGATOR.md` §4.7) — plus an optional
+description and discussion link. The on-chain `PollCreated.question` remains the **canonical headline**;
+this post does not duplicate it, it only labels the options and adds context.
+
+```json
+{
+  "schemaVersion": "1.0",
+  "daoAddress": "0x00...*",
+  "navigatorAddress": "0x00...*",
+  "pollId": 0,
+  "options": ["Teal", "Magenta", "Slate"],
+  "description": "Pick the v2 brand color.",
+  "discussionUrl": "https://forum.mydao.xyz/t/brand-color/789"
+}
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `daoAddress` | Yes | The DAO's DAOShip address. MUST equal the navigator's `NavigatorDeployed.daoShip`. |
+| `navigatorAddress` | Yes | The `SignalNavigator` contract the poll belongs to. |
+| `pollId` | Yes | Per-navigator poll id (starts at 0). The poll is keyed by `(navigatorAddress, pollId)` — `pollId` is **not** global. |
+| `options` | Yes | Ordered label array; `options[i]` is the label for option index `i`. **`options.length` MUST equal the on-chain `optionCount`** from `PollCreated`, or the post is discarded and the frontend falls back to numeric options. |
+| `description` | No | Short context (≤ 1000 chars). Long-form belongs at `discussionUrl`. |
+| `discussionUrl` | No | Link to the forum / Discord / GitHub discussion. |
+
+**Trust verification:** Index ONLY when `msg.sender == PollCreated.creator` for that
+`(navigatorAddress, pollId)`. A post from any other address is spam — discard it. This is the
+poll-creator analogue of the `vote.reason` rule: it proves the labels came from the wallet that
+actually opened the poll. (The creator is recorded in `PollCreated.creator`, not derived from a
+shares check — a creator who divests after opening the poll can still label it.)
+
+**Validation:** `options.length` MUST match the on-chain `optionCount`; mismatched posts are discarded
+(render numeric options instead). Apply the same content-rendering rules as every other tag — escape
+all label/description strings, validate `discussionUrl` against the `https`/`http`/`ipfs` scheme
+allowlist (§ Security: Content Rendering).
+
+**Ordering (second tx by necessity).** `pollId` does not exist until `createPoll` is mined, so this
+post is always a **separate transaction landing after `PollCreated`**. If it ever arrives first
+(reorg / out-of-order delivery), hold it keyed by `(navigatorAddress, pollId)` and apply it when
+`PollCreated` arrives — the same hold-until-discovered pattern used for `daoships.dao.navigators`
+above. Until the labels post is seen, render options numerically (`Option 1..n`).
+
+**Deduplication:** Key: `msg.sender` (creator) + `tag` + `navigatorAddress` + `pollId`.
+**Last-write-wins** — the creator may repost to correct a label, the description, or the link. Because
+every post persists in event logs the full edit history stays reconstructable; a frontend MAY surface
+an "edited" indicator (e.g. if labels change after voting opens) but the standard does **not** mandate
+locking edits — the creator-only trust gate is the whole access-control story.
+
 ---
 
 ## The `details` Field Convention
@@ -349,6 +443,39 @@ await daoShip.submitProposal(proposalData, 0, JSON.stringify({
 
 To **revoke** a sanction, submit a new proposal that re-posts the list with that address omitted (or an empty `navigators: []` to clear all).
 
+### Pattern 5: Signal Poll Option Labels (After `createPoll`)
+
+The poll creator posts the option labels directly, in a second tx after the poll exists on-chain. The
+headline stays on-chain in `PollCreated.question`; this post only labels the indices and adds context.
+
+```typescript
+// 1. Create the poll on-chain — the headline lives in `question`, the contract stores only the count.
+const tx = await signalNavigator.createPoll("Which color for the v2 brand?", 3, 0, 86400);
+const receipt = await tx.wait();
+// Recover the assigned pollId from the PollCreated event (ids are per-navigator, start at 0).
+const ev = receipt.logs
+  .map((l) => { try { return signalNavigator.interface.parseLog(l); } catch { return null; } })
+  .find((e) => e && e.name === "PollCreated");
+const pollId = ev.args.pollId;
+
+// 2. Post the option labels + meta, attributed to the creator's wallet (msg.sender == creator).
+await poster.post(
+  JSON.stringify({
+    schemaVersion: "1.0",
+    daoAddress: daoShipAddress,
+    navigatorAddress: await signalNavigator.getAddress(),
+    pollId: Number(pollId),
+    options: ["Teal", "Magenta", "Slate"], // options.length MUST equal the poll's optionCount (3)
+    description: "Pick the v2 brand color.",
+    discussionUrl: "https://forum.mydao.xyz/t/brand-color/789"
+  }),
+  "daoships.signal.poll"
+);
+```
+
+To **correct** a label or link, repost with the same `(navigatorAddress, pollId)` from the same
+creator wallet — last-write-wins.
+
 ---
 
 ## Trust Model
@@ -358,6 +485,7 @@ To **revoke** a sanction, submit a new proposal that re-posts the list with that
 | DAO vault address | **Verified** — governance-approved | `dao.profile`, `dao.announcement`, `dao.navigators` |
 | Deployer wallet (matches launch event) | **Verified (initial)** — one-time at launch | `dao.profile.initial` |
 | Member wallet (shares > 0) | **Member** — verified shareholder | `member.profile`, `proposal.vote.reason`, `navigator.allowlist` |
+| Poll creator (matches `PollCreated.creator`) | **Creator** — verified poll opener | `signal.poll` (for their own polls only) |
 | Any other address | **Untrusted** — do not index | — |
 
 **Rule: NEVER index a post based on tag alone.** Always verify `msg.sender` against the trust model before writing to the database. A post tagged `daoships.dao.profile` from a random wallet is spam, not a DAO profile.
@@ -374,6 +502,10 @@ For mutable content (profiles, labels, announcements):
 For append-only content (vote reasons):
 - Every post is unique, keyed by `msg.sender` + `proposalId`
 - **One vote reason per voter per proposal.** If a voter posts a second reason for the same proposal, it replaces the first.
+
+For signal poll labels (`daoships.signal.poll`):
+- Key: `msg.sender` (creator) + `tag` + `navigatorAddress` + `pollId` — last-write-wins
+- Trust gate: accept ONLY when `msg.sender == PollCreated.creator` for that `(navigatorAddress, pollId)`
 
 ---
 
@@ -411,6 +543,8 @@ All Poster content is user-supplied and MUST be treated as untrusted by frontend
    - `title`: 200 characters
 
 6. **JSON parsing.** Always `JSON.parse()` inside a try/catch. Malformed JSON should be discarded, not partially rendered.
+
+7. **Color validation.** All `theme.*` color fields MUST match `^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$` before being assigned to a CSS variable, `style` attribute, or stylesheet. An unvalidated color string is a CSS-injection vector — a value that closes the declaration can inject arbitrary rules (e.g. `#fff; } body { background: url(...)`). Reject non-conforming values and fall back to the default token; never interpolate a posted color into CSS without this check. (`mode` is constrained to the literals `"light"` / `"dark"`; treat any other value as unset.)
 
 ### IPFS Considerations
 
@@ -467,6 +601,7 @@ Poster complements DAOShip's built-in events — it does not replace them.
 | DAO branding and links | **Poster** (`daoships.dao.profile`) | Governance-approved social metadata |
 | Permissioned navigator authorization | `NavigatorSet` event | On-chain permission grant — must be contract state |
 | Read-only navigator endorsement | **Poster** (`daoships.dao.navigators`) | No permission to grant; authenticated endorsement via the vault is the only DAO-consented signal |
+| Signal poll option labels | **Poster** (`daoships.signal.poll`) | Index→label map the navigator keeps off-chain; wallet-attributed to the poll creator (`PollCreated.creator`) |
 | Vote reasoning | **Poster** (`daoships.proposal.vote.reason`) | Wallet-attributed commentary |
 | Treasury address labels | **Off-chain** (frontend address book) | No trust benefit from on-chain attribution |
 

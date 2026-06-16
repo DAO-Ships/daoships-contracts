@@ -229,7 +229,11 @@ this navigator (it mints/transfers nothing).
    member may revert `NoVotingPower`. This mirrors binding DAOShip governance.
 7. **`question` is opaque on-chain.** It is stored/emitted verbatim (IPFS hash or short text) and is
    **not** validated; option *labels* are off-chain — the contract only knows option **indices**
-   `0..optionCount-1`. Frontends own the index→label mapping.
+   `0..optionCount-1`. Frontends own the index→label mapping. The canonical off-chain home for those
+   labels (plus optional description / discussion link) is the **`daoships.signal.poll` Poster post**,
+   authenticated by `msg.sender == PollCreated.creator` and validated as `options.length == optionCount`,
+   last-write-wins per creator (see `docs/POSTER.md → Signal Poll Options`). `question` stays the
+   canonical headline; the Poster post never duplicates it, only labels the indices.
 8. **Self-asserted DAO binding.** A deployed instance claiming your DAO is not proof of endorsement.
    Trust only instances on the DAO's vault-posted `daoships.dao.navigators` allowlist (§1).
 
