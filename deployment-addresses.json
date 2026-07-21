@@ -1,14 +1,14 @@
 {
   "network": "cyprus1",
-  "chainId": "15000",
-  "timestamp": 1781642005787,
-  "deployer": "0x0006506bDE7140b85DED58a40D7444F84cde4821",
+  "chainId": "9",
+  "timestamp": 1784667245617,
+  "deployer": "0x000F85d58DE40b7Ff017425153Ee25EfB577175a",
   "contracts": {
-    "Poster": "0x0032eA61e8fF1b12A70C39696CfdA06198d2095e",
-    "SharesERC20Singleton": "0x001a4f36ead605149A0144C771B7cbf4116753a9",
-    "LootERC20Singleton": "0x002abA2592A1111b8EcfFcA98A7f30b8de30cA58",
-    "DAOShipSingleton": "0x000F38Dc0B711a57086ca0bD6fa2041D8Cd9Fe03",
-    "DAOShipLauncher": "0x005D0D996cB3f25bEC37E1827FeAfCe5AC9f7856",
-    "DAOShipAndVaultLauncher": "0x0054Cb24fA412B2b276D5F73f4A7adC70f0f0Cbf"
+    "Poster": "0x004Db03AA2593B4885AFEFF688ca2634D1533fac",
+    "SharesERC20Singleton": "0x0019d1FcdB7Aa83aCD17a5484f3246d1959d38fF",
+    "LootERC20Singleton": "0x0059458879E8f1FCA65f3068d9BC587b0Fd81286",
+    "DAOShipSingleton": "0x002956ba6223d17b67Af509bb057928299B11611",
+    "DAOShipLauncher": "0x001aa208480e8495067217c5238913dF1eC683d7",
+    "DAOShipAndVaultLauncher": "0x0067b50Dac689d8688eF8575B82Bc663802f3AF5"
   }
 }
